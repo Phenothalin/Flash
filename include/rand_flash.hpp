@@ -12,6 +12,21 @@ struct InitResult {
   std::vector<double> y0, x0;  // 归一化后的初始 y/x（便于日志）
 };
 
+struct PhaseFixOptions {
+  double eig_floor     = 1e-10;   // 切空间最小特征值下限 δ
+  double eps_shift     = 1e-12;   // 额外小移位 ε
+  double inv_tol       = 1e-12;   // 求逆时的数值容差
+  int    max_repair_it = 3;       // 失败时再微调次数
+};
+
+struct PhaseFixResult {
+  bool   applied = false;
+  double lam_min_before = 0.0;
+  double lam_min_after  = 0.0;
+  std::vector<std::vector<double>> m_fixed;
+  std::vector<std::vector<double>> M_fixed;
+};
+
 struct FlashResult {
   bool success = false;
   double pressure = 0.0;
@@ -52,6 +67,13 @@ public:
     const std::vector<double>& initialLiquidComposition = {},// 新增：液相初始组成
     int maxIterations = 50,
     double tolerance    = 1e-8);
+    
+  // 用于“收敛判断”的返回
+  struct ConvergenceInfo {
+    double max_mu_diff;   // max |muV[i]-muL[i]|
+    double elem_error;    // || A*(nV+nL-feed) ||_inf
+    bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
+  };
 
 private:
   thermo::PropertyPackageAdapter vaporModel_, liquidModel_;
@@ -111,7 +133,45 @@ private:
     double min_alpha,              
     double shrink
   );
-};
+
+  std::vector<double> solveGlobalLinearSystem(
+    const std::vector<double>& Acoef,
+    const std::vector<double>& rhs,
+    double* residual_out = nullptr) const; 
+  
+  void backSubstituteDeltas(
+    double temperature,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& MV,
+    const std::vector<std::vector<double>>& ML,
+    const std::vector<double>& muV,
+    const std::vector<double>& muL,
+    const std::vector<double>& nV,
+    const std::vector<double>& nL,
+    const std::vector<double>& Lambda,         // 长度 E
+    const std::vector<double>& deltaBeta,      // 长度 2: {Δβ_v, Δβ_l}
+    std::vector<double>& dnV,
+    std::vector<double>& dnL) const;
+
+  double applyUpdate(
+    double temperature,
+    const std::vector<double>& muV,
+    const std::vector<double>& muL,
+    const std::vector<double>& dnV,
+    const std::vector<double>& dnL,
+    std::vector<double>& nV_inout,
+    std::vector<double>& nL_inout) ;
+    
+  ConvergenceInfo checkConvergence(
+    int iternumber,
+    double tol,
+    const std::vector<double>& muV,
+    const std::vector<double>& muL,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<double>& nV,
+    const std::vector<double>& nL,
+    const std::vector<double>& feedComposition) const;
+  };
 
 class RandMultiphase {
   public:

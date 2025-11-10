@@ -278,36 +278,72 @@ auto getManagerCluster(const std::vector<std::string> &substance_list)
 //   std::cout << std::endl;
 // }
 
-TEST_F(RandFlashTest, two_phase_database2){
-  auto cluster = getManagerCluster({"ETHANE", "ETHYLENE","PROPANE","PROPYLENE"});
+std::vector<string> feed1 = {"NITROGEN","CARBON DIOXIDE","METHANE",   "ETHANE",   "PROPANE",
+  "ISOBUTANE", "n-BUTANE", "ISOPENTANE",
+  "n-PENTANE", "n-HEXANE", "n-HEPTANE"};
+std::vector<double> composition1 = {0.000001,0.015,0.55, 0.14,  0.12,  0.05, 0.045,
+         0.03,  0.025, 0.012, 0.01};
+std::vector<double> result1 = {0.003,0.0166,0.655,0.15,0.1,0.03,0.024,0.0087,0.0062,0.001,0.00036};
+
+// TEST_F(RandFlashTest, 4component_two_phase_database){
+//   auto cluster = getManagerCluster({"ETHANE", "ETHYLENE","PROPANE","PROPYLENE"});
+//   randflash::RandFlash randflashSolver(
+//       PropertyPackageType::SRK, cluster,
+//       *ls::createEigenSolver());
+//   double P = 2e6, T = 295;
+//   std::vector<double> feed = {1.0, 1.0, 1.0, 1.0};
+//   std::vector<std::vector<double>> elementMatrix(4, std::vector<double>(4, 0));
+//   // C 原子
+//   elementMatrix[0][0] = 1;
+//   elementMatrix[0][1] = 0; 
+//   elementMatrix[0][2] = 0; 
+//   elementMatrix[0][3] = 0; 
+//   // H 原子
+//   elementMatrix[1][0] = 0;
+//   elementMatrix[1][1] = 1;
+//   elementMatrix[1][2] = 0;
+//   elementMatrix[1][3] = 0; 
+
+//   elementMatrix[2][0] = 0;
+//   elementMatrix[2][1] = 0;
+//   elementMatrix[2][2] = 1;
+//   elementMatrix[2][3] = 0; 
+
+//   elementMatrix[3][0] = 0;
+//   elementMatrix[3][1] = 0;
+//   elementMatrix[3][2] = 0;
+//   elementMatrix[3][3] = 1; 
+//   FlashResult res = randflashSolver.solveTwoPhase(
+//       P, T, feed, elementMatrix, {0.2,0.3,0.2,0.3},{}, 10);
+//   std::cout << "Convergence error: " << res.convergenceError << std::endl;
+//   ASSERT_TRUE(res.success) << "Expected convergence";
+//   std::cout << "vaporFraction: " << res.vaporFraction << std::endl;
+//   std::cout << "vaporComposition: ";
+//   for (const auto &comp : res.vaporComposition) {
+//     std::cout << comp << " ";
+//   }
+//   std::cout << std::endl;
+//   std::cout << "liquidComposition: ";
+//   for (const auto &comp : res.liquidComposition) {
+//     std::cout << comp << " "; 
+//   }
+//   std::cout << std::endl;
+// }
+
+bool DatabaseTest::is_db_initialized = false;
+
+TEST_F(RandFlashTest, more_components){
+  auto cluster = getManagerCluster(feed1);
   randflash::RandFlash randflashSolver(
       PropertyPackageType::SRK, cluster,
       *ls::createEigenSolver());
   double P = 2e6, T = 295;
-  std::vector<double> feed = {1.0, 1.0, 1.0, 1.0};
-  std::vector<std::vector<double>> elementMatrix(4, std::vector<double>(4, 0));
-  // C 原子
-  elementMatrix[0][0] = 1;
-  elementMatrix[0][1] = 0; 
-  elementMatrix[0][2] = 0; 
-  elementMatrix[0][3] = 0; 
-  // H 原子
-  elementMatrix[1][0] = 0;
-  elementMatrix[1][1] = 1;
-  elementMatrix[1][2] = 0;
-  elementMatrix[1][3] = 0; 
-
-  elementMatrix[2][0] = 0;
-  elementMatrix[2][1] = 0;
-  elementMatrix[2][2] = 1;
-  elementMatrix[2][3] = 0; 
-
-  elementMatrix[3][0] = 0;
-  elementMatrix[3][1] = 0;
-  elementMatrix[3][2] = 0;
-  elementMatrix[3][3] = 1; 
+  std::vector<std::vector<double>> elementMatrix(11, std::vector<double>(11, 0));
+  for (int i = 0; i < 11; ++i) {
+    elementMatrix[i][i] = 1.0;
+  } 
   FlashResult res = randflashSolver.solveTwoPhase(
-      P, T, feed, elementMatrix, {0.2,0.3,0.2,0.3},{}, 10);
+      P, T, composition1, elementMatrix, {},{}, 30);
   std::cout << "Convergence error: " << res.convergenceError << std::endl;
   ASSERT_TRUE(res.success) << "Expected convergence";
   std::cout << "vaporFraction: " << res.vaporFraction << std::endl;
@@ -322,5 +358,3 @@ TEST_F(RandFlashTest, two_phase_database2){
   }
   std::cout << std::endl;
 }
-
-bool DatabaseTest::is_db_initialized = false;

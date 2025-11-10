@@ -1,0 +1,10 @@
+# 忽略根目录下的 build 文件夹
+/build/
+
+# 忽略所有目录中的 build 文件夹（包括子目录）
+build/
+
+# 可选：忽略其他编译生成的目录（如 cmake 的 build、make 的 out 等）
+/cmake-build/
+/out/
+/dist/

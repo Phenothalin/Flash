@@ -6,15 +6,48 @@
 #include "eos_model.hpp"
 #include "property_package.hpp"
 
-// 实现通用的牛顿-拉夫逊求解器
+// 内部优化的牛顿-拉夫逊求解器
+// auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
+//                                 const std::function<double(double)> &func_deriv,
+//                                 double initial_guess, double tol,
+//                                 int max_iter) -> double {
+//   double x_value = initial_guess;
+//   double alpha = 1;
+//   for (int iter = 0; iter < max_iter; ++iter)
+//   {
+//     double fx_value = func(x_value);
+//     double dfx_value = func_deriv(x_value);
+
+//     if (dfx_value == 0.0)
+//     {
+//       throw std::runtime_error("牛顿-拉夫逊方法中遇到零导数。");
+//     }
+
+//     double x_new = x_value - alpha * (fx_value / dfx_value);
+
+//     std::cout << "迭代 " << iter + 1 << ": x = " << x_value
+//               << ", x_new = " << x_new << ", f(x_new) = " << func(x_new)
+//               << "\n";
+
+//     if (std::abs(x_new - x_value) < tol)
+//     {
+//       std::cout << iter + 1 << " 次迭代后收敛。\n";
+//       return x_new;
+//     }
+
+//     x_value = x_new;
+//   }
+
+//   throw std::runtime_error("牛顿-拉夫逊方法在最大迭代次数内未收敛。");
+// }
+
+// 普通牛顿-拉夫逊求解器
 auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
                                 const std::function<double(double)> &func_deriv,
                                 double initial_guess, double tol,
                                 int max_iter) -> double {
   double x_value = initial_guess;
   double alpha = 1;
-  for (int iter = 0; iter < max_iter; ++iter)
-  {
     double fx_value = func(x_value);
     double dfx_value = func_deriv(x_value);
 
@@ -24,21 +57,7 @@ auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
     }
 
     double x_new = x_value - alpha * (fx_value / dfx_value);
-
-    std::cout << "迭代 " << iter + 1 << ": x = " << x_value
-              << ", x_new = " << x_new << ", f(x_new) = " << func(x_new)
-              << "\n";
-
-    if (std::abs(x_new - x_value) < tol)
-    {
-      std::cout << iter + 1 << " 次迭代后收敛。\n";
-      return x_new;
-    }
-
-    x_value = x_new;
-  }
-
-  throw std::runtime_error("牛顿-拉夫逊方法在最大迭代次数内未收敛。");
+    return x_new;
 }
 
 // Flash 基类的构造函数实现 - 增强版
@@ -193,7 +212,7 @@ void Flash::initializeTWithWilson(double pressure) {
   }
   if (T_HIGH < 0.1 * T_MAX)
   {
-    initial_T_ = 0.5 * (T_HIGH + T_LOW);
+    initial_T_ = 0.4 * (T_HIGH + T_LOW);
   }
   else
   {
@@ -289,24 +308,26 @@ auto Flash::computeLiqCompFractions(
 // 更新K值（基类通用方法）
 // 更新K值（带保护）
 auto Flash::updateKValues(const std::vector<double> &phi_liquid,
-  const std::vector<double> &phi_vapor)
--> std::vector<double> {
-std::vector<double> k_current(initial_k_.size(), 0.0);
-for (size_t i = 0; i < k_current.size(); ++i) {
-double pv = phi_vapor[i];
-double pl = phi_liquid[i];
-if (pv < 1e-12) pv = 1e-12;
-if (pl < 1e-12) pl = 1e-12;
-k_current[i] = pl / pv;
-}
-return k_current;
+                          const std::vector<double> &phi_vapor)
+    -> std::vector<double> {
+  std::vector<double> k_current(initial_k_.size(), 0.0);
+  for (size_t i = 0; i < k_current.size(); ++i)
+  {
+    double pv = phi_vapor[i];
+    double pl = phi_liquid[i];
+    if (pv < 1e-12)
+      pv = 1e-12;
+    if (pl < 1e-12)
+      pl = 1e-12;
+    k_current[i] = pl / pv;
+  }
+  return k_current;
 }
 
 // 多相扩展接口预留
 void Flash::proposeNewPhaseByStabilityAnalysis() {
-std::cout << "稳定性分析接口预留，未实现。\n";
+  std::cout << "稳定性分析接口预留，未实现。\n";
 }
-
 
 // 通用结果显示方法
 void Flash::displayResults() const {
@@ -375,89 +396,93 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
 
   switch (method)
   {
-    case ConvergenceMethod::NEWTON_RAPHSON: {
-      for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
+  case ConvergenceMethod::NEWTON_RAPHSON: {
+    for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
+    {
+      std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+
+      auto rr_func = [&](double vapfrac) -> double {
+        return calculateRachfordRice(vapfrac, k_current);
+      };
+      auto rr_deriv = [&](double vapfrac) -> double {
+        return calculateRachfordRiceDeriv(vapfrac, k_current);
+      };
+      // 使用牛顿-拉夫逊求解器求解 V
+      double v_new = NewtonRaphsonSolver::solve(rr_func, rr_deriv, v_current,
+                                                TOL_INNER, 100);
+      v_new = v_new > 1 ? 0.9999 : v_new;
+      v_new = v_new < 0 ? 0.0001 : v_new;
+      if ((v_new == 0.9999 || v_new == 0.0001) && outer_iter > 20)
       {
-        std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
-
-        auto rr_func = [&](double vapfrac) -> double {
-          return calculateRachfordRice(vapfrac, k_current);
-        };
-        auto rr_deriv = [&](double vapfrac) -> double {
-          return calculateRachfordRiceDeriv(vapfrac, k_current);
-        };
-        // 使用牛顿-拉夫逊求解器求解 V
-        double v_new = NewtonRaphsonSolver::solve(rr_func, rr_deriv, v_current,
-                                                  TOL_INNER, 100);
-        v_new = v_new > 1 ? 0.9999 : v_new;
-        v_new = v_new < 0 ? 0.0001 : v_new;
-        if ((v_new == 0.9999 || v_new == 0.0001) && outer_iter > 20)
-        {
-          v_new = v_new == 0.9999 ? 1 : 0;
-        }
-        vap_comp_frac_ = computeVapCompFractions(v_new, k_current);
-        liq_comp_frac_ = computeLiqCompFractions(v_new, k_current);
-
-        // 计算液相和气相的逸度系数
-        std::vector<double> phi_liquid =
-            property_package_.calculateLiquidFugacityCoefficientMixture(
-                temperature_, pressure_, liq_comp_frac_);
-        std::vector<double> phi_vapor =
-            property_package_.calculateVaporFugacityCoefficientMixture(
-                temperature_, pressure_, vap_comp_frac_);
-
-        k_current = updateKValues(phi_liquid, phi_vapor);
-        // 检查收敛性
-        if (checkConvergence(k_current, k_previous, v_new, v_current, TOL_OUTER,
-                            outer_iter))
-        {
-          return;
-        }
-
-        // 更新变量以进行下一次迭代
-        k_previous = k_current;
-        v_current = v_new;
+        v_new = v_new == 0.9999 ? 1 : 0;
       }
-      // 如果达到最大迭代次数仍未收敛
-      throw std::runtime_error("闪蒸计算未能收敛");
-    }
-    case ConvergenceMethod::HALLEY: {
-      for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter) {
-        // 1. 用当前K值通过Halley迭代求解新的β
-        double f = calculateRachfordRice(v_current, k_current);
-        double f1 = calculateRachfordRiceDeriv(v_current, k_current);
-        double f2 = calculateRachfordRiceSecondDeriv(v_current, k_current);
-    
-        double denom = (2.0 * f1 * f1 - f * f2);
-        if (std::abs(denom) < 1e-12) throw std::runtime_error("Halley分母接近零。");
-    
-        double v_new = v_current - (2.0 * f * f1) / denom;
-        v_new = std::min(std::max(v_new, 1e-6), 1 - 1e-6);
-    
-        // 2. 计算新的气液相组成
-        vap_comp_frac_ = computeVapCompFractions(v_new, k_current);
-        liq_comp_frac_ = computeLiqCompFractions(v_new, k_current);
-    
-        // 3. 关键缺失：更新K值（根据新相组成计算逸度系数）
-        std::vector<double> phi_liquid =
-            property_package_.calculateLiquidFugacityCoefficientMixture(
-                temperature_, pressure_, liq_comp_frac_);
-        std::vector<double> phi_vapor =
-            property_package_.calculateVaporFugacityCoefficientMixture(
-                temperature_, pressure_, vap_comp_frac_);
-        k_current = updateKValues(phi_liquid, phi_vapor);  // 必须添加这一步
-    
-        // 4. 检查收敛（此时k_current已更新，比较有效）
-        if (checkConvergence(k_current, k_previous, v_new, v_current, TOL_OUTER, outer_iter)) {
-          return;
-        }
-    
-        // 5. 更新迭代变量
-        v_current = v_new;
-        k_previous = k_current;  // 现在k_previous存储的是上一次的K值，有效
+      vap_comp_frac_ = computeVapCompFractions(v_new, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(v_new, k_current);
+
+      // 计算液相和气相的逸度系数
+      std::vector<double> phi_liquid =
+          property_package_.calculateLiquidFugacityCoefficientMixture(
+              temperature_, pressure_, liq_comp_frac_);
+      std::vector<double> phi_vapor =
+          property_package_.calculateVaporFugacityCoefficientMixture(
+              temperature_, pressure_, vap_comp_frac_);
+
+      k_current = updateKValues(phi_liquid, phi_vapor);
+      // 检查收敛性
+      if (checkConvergence(k_current, k_previous, v_new, v_current, TOL_OUTER,
+                           outer_iter))
+      {
+        return;
       }
-      throw std::runtime_error("Halley方法未收敛");
+
+      // 更新变量以进行下一次迭代
+      k_previous = k_current;
+      v_current = v_new;
     }
+    // 如果达到最大迭代次数仍未收敛
+    throw std::runtime_error("闪蒸计算未能收敛");
+  }
+  case ConvergenceMethod::HALLEY: {
+    for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
+    {
+      // 1. 用当前K值通过Halley迭代求解新的β
+      double f = calculateRachfordRice(v_current, k_current);
+      double f1 = calculateRachfordRiceDeriv(v_current, k_current);
+      double f2 = calculateRachfordRiceSecondDeriv(v_current, k_current);
+
+      double denom = (2.0 * f1 * f1 - f * f2);
+      if (std::abs(denom) < 1e-12)
+        throw std::runtime_error("Halley分母接近零。");
+
+      double v_new = v_current - (2.0 * f * f1) / denom;
+      v_new = std::min(std::max(v_new, 1e-6), 1 - 1e-6);
+
+      // 2. 计算新的气液相组成
+      vap_comp_frac_ = computeVapCompFractions(v_new, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(v_new, k_current);
+
+      // 3. 关键缺失：更新K值（根据新相组成计算逸度系数）
+      std::vector<double> phi_liquid =
+          property_package_.calculateLiquidFugacityCoefficientMixture(
+              temperature_, pressure_, liq_comp_frac_);
+      std::vector<double> phi_vapor =
+          property_package_.calculateVaporFugacityCoefficientMixture(
+              temperature_, pressure_, vap_comp_frac_);
+      k_current = updateKValues(phi_liquid, phi_vapor); // 必须添加这一步
+    std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+      // 4. 检查收敛（此时k_current已更新，比较有效）
+      if (checkConvergence(k_current, k_previous, v_new, v_current, TOL_OUTER,
+                           outer_iter))
+      {
+        return;
+      }
+
+      // 5. 更新迭代变量
+      v_current = v_new;
+      k_previous = k_current; // 现在k_previous存储的是上一次的K值，有效
+    }
+    throw std::runtime_error("Halley方法未收敛");
+  }
   }
 }
 
@@ -496,16 +521,18 @@ auto PTFlash::calculateRachfordRiceDeriv(
 
 // Rachford-Rice 二阶导数
 auto PTFlash::calculateRachfordRiceSecondDeriv(
-  const double &vapfrac, const std::vector<double> &K_CURRENT) -> double {
-double sum = 0.0;
-for (size_t i = 0; i < composition_.size(); ++i) {
-  double denominator = 1.0 + vapfrac * (K_CURRENT[i] - 1.0);
-  if (denominator == 0.0) throw std::runtime_error("RR二阶导除零。");
-  double ki_minus_1 = K_CURRENT[i] - 1.0;
-  sum += 2.0 * composition_[i] * ki_minus_1 * ki_minus_1 * ki_minus_1 /
-         (denominator * denominator * denominator);
-}
-return sum;
+    const double &vapfrac, const std::vector<double> &K_CURRENT) -> double {
+  double sum = 0.0;
+  for (size_t i = 0; i < composition_.size(); ++i)
+  {
+    double denominator = 1.0 + vapfrac * (K_CURRENT[i] - 1.0);
+    if (denominator == 0.0)
+      throw std::runtime_error("RR二阶导除零。");
+    double ki_minus_1 = K_CURRENT[i] - 1.0;
+    sum += 2.0 * composition_[i] * ki_minus_1 * ki_minus_1 * ki_minus_1 /
+           (denominator * denominator * denominator);
+  }
+  return sum;
 }
 
 // PTFlash 的 checkConvergence 方法
@@ -593,14 +620,17 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
     {
       std::cout << "迭代次数 " << outer_iter + 1 << ":\n";
 
+      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
+
       double err =
           calculateRachfordRice(k_current, vapor_fraction_, composition_);
+      std::cout << "    Rachford-Rice 方程误差: " << err << "\n";
       double derr = calculateRachfordRiceDeriv(T_current, k_current);
+      std::cout << "    Rachford-Rice 方程导数: " << derr << "\n";
       T_current = updateTemperature(T_current, err, derr);
       // 使用牛顿-拉夫逊求解器求解温度 T
 
-      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
-      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
       std::vector<double> phi_liquid =
           property_package_.calculateLiquidFugacityCoefficientMixture(
               T_current, pressure_, liq_comp_frac_);
@@ -621,8 +651,90 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
     throw std::runtime_error("PV闪蒸计算未能收敛");
   }
   case ConvergenceMethod::HALLEY: {
-    // 未实现
-    break;
+    const int MAX_OUTER_ITERATIONS = 100;
+    double T_current = initial_T_;
+    double T_previous = initial_T_;
+    std::vector<double> k_current = initial_k_;
+    std::vector<double> k_previous = initial_k_;
+
+    // 便捷函数：在给定温度下评估 f(T) = RR(K(T), V, z)
+    auto f_at_T = [&](double Ttest) {
+      // 用当前 V、当前 K 计算一次相组成（与现有 NEWTON 分支一致的做法）
+      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
+      // 计算 φ → K(Ttest)
+      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
+          Ttest, pressure_, liq_comp_frac_);
+      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
+          Ttest, pressure_, vap_comp_frac_);
+      auto Ktmp = updateKValues(phiL, phiV);
+      // RR 残差（内部已做 V<0.5 / V≥0.5 分段等价处理）
+      return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
+    };
+
+    for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
+    {
+      std::cout << "迭代次数 " << outer_iter + 1 << ":\n";
+
+      // 1) 计算 f, f', f''（中心差分，数值稳定）
+      const double eps = std::max(1e-3, std::abs(T_current) * 1e-4);
+      const double f0 = f_at_T(T_current);
+      const double f_p = f_at_T(T_current + eps);
+      const double f_m = f_at_T(T_current - eps);
+      const double f1 = (f_p - f_m) / (2.0 * eps);
+      const double f2 = (f_p - 2.0 * f0 + f_m) / (eps * eps);
+
+      // 2) Halley 步：T_new = T - 2 f f' / (2 (f')^2 - f f'')
+      double denom = 2.0 * f1 * f1 - f0 * f2;
+      if (std::abs(denom) < 1e-14)
+      {
+        // 退化时退回牛顿步
+        denom = 2.0 * f1 * f1; // 相当于一步牛顿
+      }
+      double step = (2.0 * f0 * f1) / denom;
+      double alpha = 1.0;
+      double T_trial = T_current - alpha * step;
+
+      // 3) 简单 Armijo 回溯，保证 |f| 下降（与你现有风格一致）
+      double f_trial = f_at_T(T_trial);
+      int backtrack = 0;
+      while (std::abs(f_trial) > 0.9 * std::abs(f0) && backtrack < 8)
+      {
+        alpha *= 0.5;
+        T_trial = T_current - alpha * step;
+        f_trial = f_at_T(T_trial);
+        ++backtrack;
+      }
+
+      // 下界保护，避免错误步把温度拉得过低
+      T_trial = std::max(T_trial, 150.0);
+
+      // 4) 接受新温度，刷新 φ、K、并做你的收敛判据
+      T_previous = T_current;
+      T_current = T_trial;
+
+      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
+      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
+          T_current, pressure_, liq_comp_frac_);
+      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
+          T_current, pressure_, vap_comp_frac_);
+      k_previous = k_current;
+      k_current = updateKValues(phiL, phiV);
+
+      // 5) 复用你现有的收敛检查（K_maxdiff 与 ΔT）
+      if (checkConvergence(k_current, k_previous, T_current, T_previous,
+                           outer_iter))
+      {
+        temperature_ = T_current;
+        return;
+      }
+
+      std::cout << "T_old : " << T_previous << "    T_new : " << T_current
+                << "\n";
+    }
+
+    throw std::runtime_error("Halley方法未收敛");
   }
   }
 }
@@ -665,61 +777,102 @@ auto PVFlash::calculateRachfordRice(
 // PVFlash 的 calculateRachfordRiceDeriv 方法
 auto PVFlash::calculateRachfordRiceDeriv(
     const double &temperature, const std::vector<double> &K_value) -> double {
-  double epsilon = temperature / 10000;
-  double temperature1 = temperature - epsilon;
-  double temperature2 = temperature + epsilon;
-  double dRRdT = 0;
+  const double V = vapor_fraction_;
+  // 1) 选择稳定的差分间隔（避免 T 很小时 epsilon 过小）
+  const double epsilon = std::max(1e-3, std::abs(temperature) * 1e-4);
+  const double T1 = temperature - epsilon;
+  const double T2 = temperature + epsilon;
+
+  // 2) 正确的 ∂f/∂K_i（与 PVFlash::calculateRachfordRice 的分段保持一致）
   std::vector<double> dRRdKi(composition_.size(), 0.0);
-
-  for (size_t index = 0; index < composition_.size(); ++index)
+  for (size_t i = 0; i < composition_.size(); ++i)
   {
-    double denominator = 1.0 + (vapor_fraction_ * (K_value[index] - 1.0));
-    dRRdKi[index] = composition_[index] / (denominator * denominator);
-  }
-  std::vector<double> phi_liquid1 =
-      property_package_.calculateLiquidFugacityCoefficientMixture(
-          temperature1, pressure_, liq_comp_frac_);
-  std::vector<double> phi_vapor1 =
-      property_package_.calculateVaporFugacityCoefficientMixture(
-          temperature1, pressure_, vap_comp_frac_);
-  std::vector<double> phi_liquid2 =
-      property_package_.calculateLiquidFugacityCoefficientMixture(
-          temperature2, pressure_, liq_comp_frac_);
-  std::vector<double> phi_vapor2 =
-      property_package_.calculateVaporFugacityCoefficientMixture(
-          temperature2, pressure_, vap_comp_frac_);
-  std::vector<double> k_temperature1 = updateKValues(phi_liquid1, phi_vapor1);
-  std::vector<double> k_temperature2 = updateKValues(phi_liquid2, phi_vapor2);
-  std::vector<double> dKidT(k_temperature1.size(), 0);
-  for (size_t index = 0; index < k_temperature1.size(); index++)
-  {
-    dKidT[index] =
-        (k_temperature2[index] - k_temperature1[index]) / (2 * epsilon);
-    dRRdT += dRRdKi[index] * dKidT[index];
+    const double denom = 1.0 + V * (K_value[i] - 1.0);
+    if (denom == 0.0)
+      throw std::runtime_error("RR二阶/导数除零。");
+    if (V < 0.5)
+    {
+      // f = Σ z_i (K_i-1)/(1+V(K_i-1))  ⇒ ∂f/∂K_i = z_i / denom^2
+      dRRdKi[i] = composition_[i] / (denom * denom);
+    }
+    else
+    {
+      // f = Σ z_i /(1+V(K_i-1)) - 1     ⇒ ∂f/∂K_i = - z_i * V / denom^2
+      dRRdKi[i] = -composition_[i] * V / (denom * denom);
+    }
   }
 
+  // 3) 差分计算 dK_i/dT（沿用你原有的 fugacity→K 流程）
+  //    注意：用上一步固定的 x,y 计算 φ，即可得到 K(T±ε)
+  std::vector<double> phiL1 =
+      property_package_.calculateLiquidFugacityCoefficientMixture(
+          T1, pressure_, liq_comp_frac_);
+  std::vector<double> phiV1 =
+      property_package_.calculateVaporFugacityCoefficientMixture(
+          T1, pressure_, vap_comp_frac_);
+  std::vector<double> phiL2 =
+      property_package_.calculateLiquidFugacityCoefficientMixture(
+          T2, pressure_, liq_comp_frac_);
+  std::vector<double> phiV2 =
+      property_package_.calculateVaporFugacityCoefficientMixture(
+          T2, pressure_, vap_comp_frac_);
+
+  std::vector<double> K1 = updateKValues(phiL1, phiV1);
+  std::vector<double> K2 = updateKValues(phiL2, phiV2);
+
+  double dRRdT = 0.0;
+  for (size_t i = 0; i < K1.size(); ++i)
+  {
+    const double dKi_dT = (K2[i] - K1[i]) / (2.0 * epsilon);
+    dRRdT += dRRdKi[i] * dKi_dT;
+  }
   return dRRdT;
 }
 
 // PVFlash 的 updateTemperature 方法
-auto PVFlash::updateTemperature(const double &temperature, const double &err,
+auto PVFlash::updateTemperature(const double &T, const double &err,
                                 const double &derr) -> double {
-  double temperature_new = 0;
-  double alpha = 1;
-  double step = err / derr;
-  if (std::abs(derr) < 1e-10)
-  {
+  if (std::abs(derr) < 1e-12)
     throw std::runtime_error("牛顿法迭代过程中分母接近0");
-  }
-  if (std::abs(step) > 0.1 * temperature)
+  double alpha = 1.0;
+  double step = err / derr;
+
+  // 原有相对步长限制先保留
+  if (std::abs(step) > 0.1 * std::max(100.0, std::abs(T)))
   {
-    alpha = 0.1 * temperature / std::abs(step);
-    std::cout << "    限制步长大小，alpha = " << alpha << "\n";
+    alpha = 0.1 * std::max(100.0, std::abs(T)) / std::abs(step);
   }
-  temperature_new = temperature - alpha * step;
-  std::cout << "T_old : " << temperature << "    T_new : " << temperature_new
-            << "\n";
-  return temperature_new;
+
+  // Armijo 型回溯（需要一个计算 f 的 lambda；这里用最近一次的 k_current
+  // 近似即可）
+  auto f_at = [&](double Ttest) {
+    // 用当前 V,k 组合出的 x,y 计算 φ → K(Ttest) → f
+    auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
+        Ttest, pressure_, liq_comp_frac_);
+    auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
+        Ttest, pressure_, vap_comp_frac_);
+    auto Ktmp = updateKValues(phiL, phiV);
+    return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
+  };
+
+  const double f0 = err;
+  double T_new = T - alpha * step;
+  double f1 = f_at(T_new);
+
+  int backtrack = 0;
+  while (std::abs(f1) > 0.9 * std::abs(f0) && backtrack < 8)
+  { // 0.9: 需要有明显下降
+    alpha *= 0.5;
+    T_new = T - alpha * step;
+    f1 = f_at(T_new);
+    ++backtrack;
+  }
+
+  // 物理下界保护，避免被错误步拉到极低温
+  T_new = std::max(T_new, 150.0); // 也可用系统最小可用温度
+
+  std::cout << "T_old : " << T << "    T_new : " << T_new << "\n";
+  return T_new;
 }
 
 // PVFlash 的 checkConvergence 方法
@@ -799,14 +952,14 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
     for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
     {
       std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
 
       double err =
           calculateRachfordRice(k_current, vapor_fraction_, composition_);
       double derr = calculateRachfordRiceDeriv(P_current, k_current);
       P_current = updatePressure(P_current, err, derr);
 
-      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
-      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
       std::vector<double> phi_liquid =
           property_package_.calculateLiquidFugacityCoefficientMixture(
               temperature_, P_current, liq_comp_frac_);
@@ -827,8 +980,61 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
     throw std::runtime_error("TV闪蒸计算未能收敛");
   }
   case ConvergenceMethod::HALLEY: {
-    // 未实现
-    break;
+    auto f_at_P = [&](double Ptest){
+      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
+      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
+          temperature_, Ptest, liq_comp_frac_);
+      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
+          temperature_, Ptest, vap_comp_frac_);
+      auto Ktmp = updateKValues(phiL, phiV);
+      return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
+    };
+  
+    for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter) {
+      std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+      const double eps = std::max(1e3, std::abs(P_current) * 1e-4);
+      const double f0 = f_at_P(P_current);
+      const double f_p = f_at_P(P_current + eps);
+      const double f_m = f_at_P(P_current - eps);
+      const double f1 = (f_p - f_m) / (2.0 * eps);
+      const double f2 = (f_p - 2.0*f0 + f_m) / (eps * eps);
+  
+      double denom = 2.0 * f1 * f1 - f0 * f2;
+      if (std::abs(denom) < 1e-14) denom = 2.0 * f1 * f1; // 退回牛顿
+      double step = (2.0 * f0 * f1) / denom;
+      double alpha = 1.0;
+      double P_trial = P_current - alpha * step;
+  
+      // Armijo 回溯
+      double f_trial = f_at_P(P_trial);
+      int bt = 0;
+      while (std::abs(f_trial) > 0.9 * std::abs(f0) && bt < 8) {
+        alpha *= 0.5;
+        P_trial = P_current - alpha * step;
+        f_trial = f_at_P(P_trial);
+        ++bt;
+      }
+      if (P_trial <= 1.0) P_trial = std::max(0.5 * P_current, 1.0);
+  
+      // 刷新 φ,K 并做你的收敛判据
+      P_previous = P_current;
+      P_current  = P_trial;
+      vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
+      liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
+      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
+          temperature_, P_current, liq_comp_frac_);
+      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
+          temperature_, P_current, vap_comp_frac_);
+      k_previous = k_current;
+      k_current  = updateKValues(phiL, phiV);
+  
+      if (checkConvergence(k_current, k_previous, P_current, P_previous, outer_iter)) {
+        pressure_ = P_current;
+        return;
+      }
+    }
+    throw std::runtime_error("Halley方法未收敛");
   }
   }
 }
@@ -870,68 +1076,91 @@ auto TVFlash::calculateRachfordRice(
 
 // TVFlash 的 calculateRachfordRiceDeriv 方法
 auto TVFlash::calculateRachfordRiceDeriv(
-    const double &pressure, const std::vector<double> &K_value) -> double {
-  double epsilon = pressure / 10000;
-  double pressure1 = pressure - epsilon;
-  double pressure2 = pressure + epsilon;
-  double dRRdP = 0;
-  std::vector<double> dRRdKi(composition_.size(), 0.0);
+  const double &pressure, const std::vector<double> &K_value) -> double {
+// 数值差分步长（相对量级），并做下界保护，避免 P-ε <= 0
+const double eps_rel = std::max(1e-4, 1e-6);                  // 相对步
+const double epsilon = std::max(1e3, std::abs(pressure) * eps_rel); // 绝对步(>=1000 Pa)
+const double P1 = std::max(1.0, pressure - epsilon);
+const double P2 = pressure + epsilon;
 
-  for (size_t index = 0; index < composition_.size(); ++index)
-  {
-    double denominator = 1.0 + (vapor_fraction_ * (K_value[index] - 1.0));
-    dRRdKi[index] = composition_[index] / (denominator * denominator);
+// 计算 ∂f/∂K_i（与 RR 的分段形式严格一致）
+std::vector<double> dRRdKi(composition_.size(), 0.0);
+for (size_t i = 0; i < composition_.size(); ++i) {
+  const double denom = 1.0 + vapor_fraction_ * (K_value[i] - 1.0);
+  if (denom == 0.0) {
+    throw std::runtime_error("Rachford–Rice 导数中遇到除以零。");
   }
-
-  std::vector<double> phi_liquid1 =
-      property_package_.calculateLiquidFugacityCoefficientMixture(
-          temperature_, pressure1, liq_comp_frac_);
-  std::vector<double> phi_vapor1 =
-      property_package_.calculateVaporFugacityCoefficientMixture(
-          temperature_, pressure1, vap_comp_frac_);
-  std::vector<double> phi_liquid2 =
-      property_package_.calculateLiquidFugacityCoefficientMixture(
-          temperature_, pressure2, liq_comp_frac_);
-  std::vector<double> phi_vapor2 =
-      property_package_.calculateVaporFugacityCoefficientMixture(
-          temperature_, pressure2, vap_comp_frac_);
-  std::vector<double> k_pressure1 = updateKValues(phi_liquid1, phi_vapor1);
-  std::vector<double> k_pressure2 = updateKValues(phi_liquid2, phi_vapor2);
-  std::vector<double> dKidP(k_pressure1.size(), 0);
-  for (size_t index = 0; index < k_pressure1.size(); index++)
-  {
-    dKidP[index] = (k_pressure2[index] - k_pressure1[index]) / (2 * epsilon);
-    dRRdP += dRRdKi[index] * dKidP[index];
+  if (vapor_fraction_ < 0.5) {
+    // f = Σ z_i (K_i-1) / (1 + V (K_i-1))  ⇒  ∂f/∂K_i = z_i / denom^2
+    dRRdKi[i] = composition_[i] / (denom * denom);
+  } else {
+    // f = Σ z_i / (1 + V (K_i-1)) - 1      ⇒  ∂f/∂K_i = - z_i * V / denom^2
+    dRRdKi[i] = -composition_[i] * vapor_fraction_ / (denom * denom);
   }
-
-  return dRRdP;
 }
+
+// 在 P±ε 处评估 φ → K，用中心差分近似 dK_i/dP
+// 注意：此处使用“最近一次”的 x,y（liq_comp_frac_, vap_comp_frac_）作为固定点
+// 与你现有外层迭代顺序一致。
+auto phiL1 = property_package_.calculateLiquidFugacityCoefficientMixture(
+    temperature_, P1, liq_comp_frac_);
+auto phiV1 = property_package_.calculateVaporFugacityCoefficientMixture(
+    temperature_, P1, vap_comp_frac_);
+auto phiL2 = property_package_.calculateLiquidFugacityCoefficientMixture(
+    temperature_, P2, liq_comp_frac_);
+auto phiV2 = property_package_.calculateVaporFugacityCoefficientMixture(
+    temperature_, P2, vap_comp_frac_);
+
+std::vector<double> K1 = updateKValues(phiL1, phiV1);
+std::vector<double> K2 = updateKValues(phiL2, phiV2);
+
+// 链式法则：df/dP = Σ (∂f/∂K_i) * (dK_i/dP)
+double dRRdP = 0.0;
+for (size_t i = 0; i < K1.size(); ++i) {
+  const double dKi_dP = (K2[i] - K1[i]) / (P2 - P1); // 中心差分
+  dRRdP += dRRdKi[i] * dKi_dP;
+}
+return dRRdP;
+}
+
 
 // TVFlash 的 updatePressure 方法
-auto TVFlash::updatePressure(const double &pressure, const double &err,
-                             const double &derr) -> double {
-  double pressure_new = 0;
-  double alpha = 1;
+auto TVFlash::updatePressure(const double &P, const double &err, const double &derr) -> double {
+  if (std::abs(derr) < 1e-12) throw std::runtime_error("牛顿法迭代过程中分母接近0");
   double step = err / derr;
-  if (std::abs(derr) < 1e-10)
-  {
-    throw std::runtime_error("牛顿法迭代过程中分母接近0");
-  }
-  if (std::abs(step) > 0.1 * pressure)
-  {
-    alpha = 0.1 * pressure / std::abs(step);
-    std::cout << "    限制步长大小，alpha = " << alpha << "\n";
-  }
-  pressure_new = pressure - alpha * step;
-  std::cout << "P_old : " << pressure << "    P_new : " << pressure_new << "\n";
-  // 确保压力不会变为负值
-  if (pressure_new <= 0)
-  {
-    pressure_new = pressure * 0.5; // 如果更新导致负值，则减半
+  double alpha = 1.0;
+
+  // 相对步长硬限（保留）
+  if (std::abs(step) > 0.1 * std::max(1e5, std::abs(P))) {
+    alpha = 0.1 * std::max(1e5, std::abs(P)) / std::abs(step);
   }
 
-  return pressure_new;
+  // 定义 f(P) 评估（用当前 x,y 计算 φ→K，再算 RR）
+  auto f_at = [&](double Ptest) {
+    auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
+        temperature_, Ptest, liq_comp_frac_);
+    auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
+        temperature_, Ptest, vap_comp_frac_);
+    auto Ktmp = updateKValues(phiL, phiV);
+    return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
+  };
+
+  const double f0 = err;
+  double P_new = P - alpha * step;
+  double f1 = f_at(P_new);
+  int backtrack = 0;
+  while (std::abs(f1) > 0.9 * std::abs(f0) && backtrack < 8) {
+    alpha *= 0.5;
+    P_new = P - alpha * step;
+    f1 = f_at(P_new);
+    ++backtrack;
+  }
+  if (P_new <= 1.0) P_new = std::max(0.5 * P, 1.0); // 物理下界保护
+
+  std::cout << "P_old : " << P << "    P_new : " << P_new << "\n";
+  return P_new;
 }
+
 
 // TVFlash 的 checkConvergence 方法
 auto TVFlash::checkConvergence(const std::vector<double> &k_current,
