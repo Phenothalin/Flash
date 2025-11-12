@@ -22,12 +22,16 @@ add_executable(tp_thermo_check tests/tp_thermo_check.cpp)
 target_include_directories(tp_thermo_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tp_thermo_check PRIVATE thermopack)
 
-# macOS: 让可执行在运行时能找到 libthermopack.dylib
+# macOS: embed rpath pointing to ThermoPack's dylib dir
 if(APPLE)
-  set(CMAKE_MACOSX_RPATH ON)
+  # 取出 thermopack 这个导入目标的所在目录
+  get_target_property(_TP_LIB thermopack LOCATION)  # 如果你的导入目标名是 'thermopack' 就用它
+  get_filename_component(_TP_LIBDIR "${_TP_LIB}" DIRECTORY)
+
   set_target_properties(tp_thermo_check PROPERTIES
     BUILD_WITH_INSTALL_RPATH ON
-    INSTALL_RPATH "@loader_path"
+    BUILD_RPATH "${_TP_LIBDIR}"
+    INSTALL_RPATH "${_TP_LIBDIR};@loader_path"
   )
 endif()
 
