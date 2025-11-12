@@ -1,0 +1,39 @@
+cmake_minimum_required(VERSION 3.18)
+project(Flash LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 让 CMake 能在环境变量里直接找到 thermopack-config.cmake
+if(DEFINED ENV{THERMOPACK_DIR})
+  list(PREPEND CMAKE_PREFIX_PATH "$ENV{THERMOPACK_DIR}")
+endif()
+
+# 使用 ThermoPack 的包配置（由 thermopack-config.cmake 提供）
+find_package(THERMOPACK CONFIG REQUIRED)
+
+# 你的主库/可执行（如有需要可以继续添加）
+# add_library(randflash src/rand_flash.cpp)  # 示例（若你要独立成库）
+# target_include_directories(randflash PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# target_link_libraries(randflash PUBLIC thermopack)
+
+# 轻量热力学连通性与导数核对的测试
+add_executable(tp_thermo_check tests/tp_thermo_check.cpp)
+target_include_directories(tp_thermo_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(tp_thermo_check PRIVATE thermopack)
+
+# macOS: 让可执行在运行时能找到 libthermopack.dylib
+if(APPLE)
+  set(CMAKE_MACOSX_RPATH ON)
+  set_target_properties(tp_thermo_check PROPERTIES
+    BUILD_WITH_INSTALL_RPATH ON
+    INSTALL_RPATH "@loader_path"
+  )
+endif()
+
+# Windows: 生成后把 thermopack 的 DLL 复制到可执行旁边
+if(WIN32)
+  add_custom_command(TARGET tp_thermo_check POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:thermopack> $<TARGET_FILE_DIR:tp_thermo_check>)
+endif()
