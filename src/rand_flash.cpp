@@ -170,23 +170,17 @@ static PhaseFixResult fix_phase_hessian_one_phase(
   return out;
 }
 
-RandFlash::RandFlash(
-    PropertyPackageType packageType,
-    std::shared_ptr<material_object::Cluster> componentCluster,
-    ls::LinearSolverInterface& linearSolver)
-  : vaporModel_(packageType, componentCluster),
-    liquidModel_(packageType, componentCluster),
-    linearSolver_(linearSolver)
+RandFlash::RandFlash(thermo::IThermoBackend& thermo,
+  ls::LinearSolverInterface& linearSolver)
+  : thermo_(thermo),
+  linearSolver_(linearSolver)
 {
   // 如果有额外初始化,可以放在这里
 }
 
 // ---- in rand_flash.cpp ----
 InitResult RandFlash::initializeTwoPhase(
-  double /*pressure*/,
-  double /*temperature*/,
   const std::vector<double>& feed,
-  const std::vector<std::vector<double>>& /*elementMatrix*/,
   const std::vector<double>& vaporGuess,
   const std::vector<double>& liquidGuess,
   double margin) const
@@ -334,37 +328,114 @@ InitResult RandFlash::initializeTwoPhase(
     return out;
   }
 
-  // 案例 D：都没给 —— 回退到 50/50 平分
-  out.betaV = 0.5*Ftot;
-  out.betaL = 0.5*Ftot;
-  out.nV = out.nL = feed;
-  for (double &x : out.nV) x *= 0.5;
-  for (double &x : out.nL) x *= 0.5;
-  out.y0.resize(C); out.x0.resize(C);
-  for (size_t i=0;i<C;++i) { out.y0[i] = out.nV[i]/out.betaV; out.x0[i] = out.nL[i]/out.betaL; }
-  return out;
+  // 案例 D：都没给 —— 回退到 50/50 平分，并沿“轻 → 气、重 → 液”的方向打破对称
+  {
+    const double alpha = 0.2;        // 指数扰动强度（控制轻/重偏向）
+    const double tiltStrength = 0.5; // 0<tiltStrength<=1，控制从 50/50 偏离的幅度
+
+    // 1) 进料摩尔分率 xFeed
+    std::vector<double> xFeed(C);
+    double nTot = std::accumulate(feed.begin(), feed.end(), 0.0);
+    if (nTot <= 0.0) {
+      throw std::runtime_error("initializeTwoPhase: total feed is non-positive in case D");
+    }
+    for (size_t i = 0; i < C; ++i) {
+      xFeed[i] = feed[i] / nTot;
+    }
+
+    // 2) 基于轻/重指数的“倾向性”分布（只是用来产生扰动方向）
+    std::vector<double> wV(C), wL(C);
+    for (size_t i = 0; i < C; ++i) {
+      // 把“越轻”(索引小)的组分往气相推一点，重的往液相推一点
+      double heaviness = static_cast<double>(i);
+      wV[i] = xFeed[i] * std::exp(-alpha * heaviness);
+      wL[i] = xFeed[i] * std::exp(+alpha * heaviness);
+    }
+    // 用前面定义的 normalized(...) lambda 做归一
+    wV = normalized(wV);
+    wL = normalized(wL);
+
+    // 3) 用 wV - wL 生成一个零均值（按 xFeed 加权）的扰动方向 w_i
+    std::vector<double> d(C);
+    for (size_t i = 0; i < C; ++i) {
+      d[i] = wV[i] - wL[i]; // 轻组分 d>0，重组分 d<0
+    }
+
+    double mu = 0.0;
+    for (size_t i = 0; i < C; ++i) {
+      mu += xFeed[i] * d[i];  // xFeed 加权平均
+    }
+
+    std::vector<double> w(C);
+    double maxAbsW = 0.0;
+    for (size_t i = 0; i < C; ++i) {
+      w[i] = d[i] - mu;                    // 保证 Σ xFeed[i] * w[i] = 0
+      maxAbsW = std::max(maxAbsW, std::fabs(w[i]));
+    }
+
+    // 4) 构造扰动 ε_i，使：
+    //    y0_i = xFeed_i + ε_i
+    //    x0_i = xFeed_i - ε_i
+    //    Σ ε_i = 0, 且 |ε_i| ≤ tiltStrength * xFeed_i
+    std::vector<double> eps(C, 0.0);
+    if (maxAbsW > 0.0 && tiltStrength > 0.0) {
+      const double k = tiltStrength / maxAbsW; // 控制最大相对偏移不超过 tiltStrength
+      for (size_t i = 0; i < C; ++i) {
+        double e = k * xFeed[i] * w[i];
+        const double bound = tiltStrength * xFeed[i];
+        if (e >  bound) e =  bound;
+        if (e < -bound) e = -bound;
+        eps[i] = e;
+      }
+    }
+
+    // 5) 得到两相的摩尔分率 y0 / x0：
+    //    - 轻组分在气相略多，在液相略少
+    //    - 且对每个 i 有 y0_i + x0_i = 2 xFeed_i
+    out.y0.assign(C, 0.0);
+    out.x0.assign(C, 0.0);
+    for (size_t i = 0; i < C; ++i) {
+      out.y0[i] = xFeed[i] + eps[i];
+      out.x0[i] = xFeed[i] - eps[i];
+    }
+
+    // 6) 50/50 分相（总摩尔数各一半）
+    out.betaV = 0.5 * Ftot;
+    out.betaL = 0.5 * Ftot;
+
+    // 7) 按 y0/x0 分配 nV / nL：
+    //    在 Ftot = Σ feed 的前提下，对每个组分 i 有：
+    //    nV_i + nL_i = Ftot * xFeed_i = feed_i
+    out.nV.resize(C);
+    out.nL.resize(C);
+    for (size_t i = 0; i < C; ++i) {
+      out.nV[i] = out.betaV * out.y0[i];
+      out.nL[i] = out.betaL * out.x0[i];
+    }
+
+    return out;
+  }
+
+
 }
 
 // 1) 局部 Jacobian 构造：对应论文式 (4.11)-(4.14)
 //    m_j[i][k] = β_j * ( (1/RT) * ∂μ_i/∂n_k + 1 )
 //    mu_j 已经由 chemicalPotentials 给出
-void RandFlash::assembleLocalJacobian(
-  double temperature,
-  double pressure,
-  std::vector<double>& moleNumbers,
-  thermo::PropertyPackageAdapter& model,
+void randflash::RandFlash::assembleLocalJacobian(
+  const thermo::PhaseState& state,
   std::vector<std::vector<double>>& m,
   std::vector<double>& mu)
 {
-  for (double &ni : moleNumbers) if (ni <= 1e-10) ni = 1e-10; 
-
-  // 1. 构造 PhaseState
-  thermo::PhaseState state{ temperature, pressure, moleNumbers };
+  // 1. 复制一份状态，以便安全地改 n_i
+  thermo::PhaseState st = state;
+  for (double &ni : st.moleNumbers) {
+      if (ni <= 1e-10) ni = 1e-10;
+  }
 
   // 2. 计算 μ 和 ∂μ/∂n
-  mu = model.chemicalPotentials(state);
-
-  auto dmun = model.dMu_dN(state);
+  mu = thermo_.chemicalPotentials(st);
+  auto dmun = thermo_.dmu_dn(st);
   // for (size_t i = 0; i < moleNumbers.size(); ++i) {
   //   for (size_t k = 0; k < moleNumbers.size(); ++k) {
   //       std::cout << dmun[i][k] << "  ";  // 同一行打印
@@ -372,9 +443,9 @@ void RandFlash::assembleLocalJacobian(
   //   std::cout << std::endl;  // 换行
   // }    
   // 3. 构造 m_j 矩阵：m_j[i][k] = β_j*(dμ/dn/RT +1),此处 β_j = totalMoles
-  double totalMoles = std::accumulate(moleNumbers.begin(), moleNumbers.end(), 0.0);
-  double RT = R_CONST * temperature;
-  size_t C = moleNumbers.size();
+  double totalMoles = std::accumulate(st.moleNumbers.begin(), st.moleNumbers.end(), 0.0);
+  double RT = R_CONST * st.Temperature;
+  size_t C = st.moleNumbers.size();
   m.assign(C, std::vector<double>(C,0.0));
   for (size_t i=0;i<C;++i){
     for (size_t k=0;k<C;++k){
@@ -390,8 +461,8 @@ void RandFlash::assembleLocalJacobian(
   // }
   
   // 轻微对角抖动（相对尺度）
-  double dmean = 0.0; for (size_t i=0;i<C;++i) dmean += std::abs(m[i][i]); dmean = std::max(dmean/C, 1.0);
-  for (size_t i=0;i<C;++i) m[i][i] += 1e-10 * dmean;
+  // double dmean = 0.0; for (size_t i=0;i<C;++i) dmean += std::abs(m[i][i]); dmean = std::max(dmean/C, 1.0);
+  // for (size_t i=0;i<C;++i) m[i][i] += 1e-10 * dmean;
 }
 
 // 2) 全局系统装配：对应论文式 (4.21)-(4.25)
@@ -776,6 +847,8 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   const std::vector<double>& feedComposition) const
 {
   RandFlash::ConvergenceInfo info{};
+  int C = nV.size();
+  int E = elementMatrix.size();
   // max |muV - muL|
   double max_mu_diff = 0.0;
   for (size_t i = 0; i < muV.size(); ++i) {
@@ -802,6 +875,21 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   // 与原日志一致的输出
   std::cout << "Iter "<< iternumber <<" | max_mu_diff: " << max_mu_diff << std::endl;
   std::cout << "Iter "<< iternumber <<" | element error: " << elem_err << "\n" << std::endl;
+  
+  // // 假设 elementMatrix 是 E×C，feed 是原始进料摩尔数
+  // std::vector<double> nTot(C);
+  // for (size_t i = 0; i < C; ++i) nTot[i] = nV[i] + nL[i];
+
+  // for (size_t e = 0; e < E; ++e) {
+  //     double lhs = 0.0;
+  //     double rhs = 0.0;
+  //     for (size_t i = 0; i < C; ++i) {
+  //         lhs += elementMatrix[e][i] * nTot[i];
+  //         rhs += elementMatrix[e][i] * feedComposition[i];
+  //     }
+  //     double err = lhs - rhs;
+  //     std::cout << "element " << e << " residual = " << err << "\n";
+  // }
 
   info.max_mu_diff = max_mu_diff;
   info.elem_error  = elem_err;
@@ -809,127 +897,150 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   return info;
 }
 
-FlashResult RandFlash::solveTwoPhase(
-  double pressure,
-  double temperature,
-  const std::vector<double>& feedComposition,
+randflash::FlashResult RandFlash::solveTwoPhase(
+  const thermo::PhaseState& state,
   const std::vector<std::vector<double>>& elementMatrix,
-  const std::vector<double>& initialVaporComposition,  // 新增参数
-  const std::vector<double>& initialLiquidComposition, // 新增参数
+  const std::vector<double>& initialVaporComposition,   // 可空
+  const std::vector<double>& initialLiquidComposition,  // 可空
   int maxIter,
   double tol)
 {
-  size_t C = feedComposition.size();
-  size_t E = elementMatrix.size();
+  const size_t C = state.moleNumbers.size();
+  const size_t E = elementMatrix.size();
 
-  // 计算总进料摩尔数
-  double totalFeed = std::accumulate(feedComposition.begin(), feedComposition.end(), 0.0);
-  
-  // 初始猜 nV, nL：优先使用提供的初始组成,否则使用平分策略
+  // 计算总进料摩尔数（目前只用于 debug）
+  double totalFeed = std::accumulate(state.moleNumbers.begin(),
+                                     state.moleNumbers.end(), 0.0);
+
+  // 1) 初始猜 nV, nL（优先使用提供的初始组成，否则使用平分策略）
   std::vector<double> nV(C), nL(C);
   auto init = initializeTwoPhase(
-    pressure, temperature,
-    feedComposition, elementMatrix,
-    initialVaporComposition, initialLiquidComposition,
-    /*margin=*/1e-3);
+      state.moleNumbers,
+      initialVaporComposition,
+      initialLiquidComposition,
+      /*margin=*/1e-3);
   nV = std::move(init.nV);
   nL = std::move(init.nL);
 
-  std::cout << "Calculated beta: " << init.betaV
-            << "\n初始气相摩尔分率为： " << (init.betaV / (init.betaV+init.betaL))
+  std::cout << "Calculated betaV: " << init.betaV
+            << "\n初始气相摩尔分率 betaV/(betaV+betaL) = "
+            << (init.betaV / (init.betaV + init.betaL))
             << std::endl;
 
+  // 2) 构造两相的 PhaseState（phaseFlag 用 backend 提供的 vapor/liquid 标志）
+  thermo::PhaseState vap{state.Temperature, state.Pressure, nV, thermo_.vaporPhaseFlag()};
+  thermo::PhaseState liq{state.Temperature, state.Pressure, nL, thermo_.liquidPhaseFlag()};
+  std::cout<<"构造两相PhaseState的 phaseFlag  "<<thermo_.vaporPhaseFlag()<<"  "<<thermo_.liquidPhaseFlag()<<std::endl;
+  
   FlashResult result;
-  result.pressure       = pressure;
-  result.temperature    = temperature;
-  result.feedComposition= feedComposition;
+  result.pressure        = state.Pressure;
+  result.temperature     = state.Temperature;
+  result.feedComposition = state.moleNumbers;
+  result.success         = false;  // 默认失败，收敛时再置 true
 
-  // 分配临时存储
-  std::vector<std::vector<double>> mV, mL;     // 块 Hessian m_j
-  std::vector<double> muV, muL;                // μ 向量
-  std::vector<std::vector<double>> MV, ML;     // 反演后 M_j
-  std::vector<double> Acoef, rhs, sol;         // 全局系统
-  std::vector<double> Lambda, deltaBeta(2);
-  std::vector<double> dnV(C), dnL(C);
+  // 分配临时存储（在循环外分配，循环内重复复用）
+  std::vector<std::vector<double>> mV, mL;     // 局部 m_j
+  std::vector<double>              muV, muL;   // 局部 μ
+  std::vector<std::vector<double>> MV, ML;     // m_j 反演后的 M_j
+  std::vector<double> Acoef, rhs, sol;         // 全局系统 A * x = rhs
+  std::vector<double> Lambda;                  // 元素平衡拉格朗日乘子
+  std::vector<double> deltaBeta(2);            // Δβ_v, Δβ_l
+  std::vector<double> dnV(C), dnL(C);          // Δn^V, Δn^L
 
-  std::cout << "进入迭代循环,maxIter=" << maxIter << std::endl;
-  try{
+  std::cout << "进入迭代循环, maxIter = " << maxIter << std::endl;
+
+  try {
     for (int iter = 0; iter < maxIter; ++iter) {
-      // 1) 本地 Jacobian 和 μ
-      vaporModel_.setPhaseIndex(0);
-      liquidModel_.setPhaseIndex(1);
+      // --- 2.1 更新 PhaseState 中的 n ---
+      vap.moleNumbers = nV;
+      liq.moleNumbers = nL;
 
-      std::cout << "开始组装局部矩阵,moleNumbers大小=" << feedComposition.size() << std::endl;
-      assembleLocalJacobian(
-        temperature, pressure, nV, vaporModel_, mV, muV);
-      assembleLocalJacobian(
-        temperature, pressure, nL, liquidModel_, mL, muL);
-      
-      std::cout<<"局部矩阵组装完成,迭代 "<<iter+1<<std::endl;
+      std::cout << "开始组装局部矩阵, C = "
+                << state.moleNumbers.size()
+                << " (迭代 " << (iter+1) << ")\n";
 
-      // === NEW: 相内 Hessian 程序性校正（两相各做一次） ===
+      // --- 2.2 组装两相的局部 Hessian m_j 和 μ ---
+      assembleLocalJacobian(vap, mV, muV);
+      assembleLocalJacobian(liq, mL, muL);
+      // std::cout<<"气相组成化学势为："<<std::endl;
+      // for (size_t i = 0; i < C; ++i) {
+      //       std::cout << muV[i] <<"  " ;
+      // }
+      // std::cout<<"\n"<<"液相组成化学势为："<<std::endl;;
+      // for (size_t i = 0; i < C; ++i) {
+      //   std::cout << muL[i] << "  ";
+      // }
+      std::cout << "局部矩阵组装完成, 迭代 " << (iter+1) << std::endl;
+
+      // === 2.3 相内 Hessian 修正 ===
       double betaV = std::accumulate(nV.begin(), nV.end(), 0.0);
       double betaL = std::accumulate(nL.begin(), nL.end(), 0.0);
-      std::vector<double> xV(nV.size()), xL(nL.size());
-      for (size_t i=0;i<nV.size();++i){ xV[i] = (betaV>0)? nV[i]/betaV : 1.0/double(nV.size()); }
-      for (size_t i=0;i<nL.size();++i){ xL[i] = (betaL>0)? nL[i]/betaL : 1.0/double(nL.size()); }
+      std::vector<double> xV(C), xL(C);
+      for (size_t i = 0; i < C; ++i) {
+        xV[i] = (betaV > 0.0) ? nV[i] / betaV : 1.0 / double(C);
+        xL[i] = (betaL > 0.0) ? nL[i] / betaL : 1.0 / double(C);
+      }
 
       PhaseFixOptions pfx;
       auto fixV = fix_phase_hessian_one_phase(xV, mV, pfx);
-      if (fixV.applied){
+      if (fixV.applied) {
         mV = fixV.m_fixed;
-        std::cout << "[PhaseFix] Vapor: lam_min "<<fixV.lam_min_before
-                  <<" -> "<<fixV.lam_min_after<<"\n";
+        std::cout << "[PhaseFix] Vapor: lam_min "
+                  << fixV.lam_min_before << " -> "
+                  << fixV.lam_min_after << "\n";
       }
       auto fixL = fix_phase_hessian_one_phase(xL, mL, pfx);
-      if (fixL.applied){
+      if (fixL.applied) {
         mL = fixL.m_fixed;
-        std::cout << "[PhaseFix] Liquid: lam_min "<<fixL.lam_min_before
-                  <<" -> "<<fixL.lam_min_after<<"\n";
+        std::cout << "[PhaseFix] Liquid: lam_min "
+                  << fixL.lam_min_before << " -> "
+                  << fixL.lam_min_after << "\n";
       }
-      // 2) 反演 m_j -> M_j
+
+      // 2.4 反演 m_j -> M_j
       MV = invert(mV);
       ML = invert(mL);
+      std::cout << "局部矩阵反演完成, 迭代 " << (iter+1) << std::endl;
       // for (size_t i = 0; i < C; ++i) {
       //   for (size_t k = 0; k < C; ++k) {
       //       std::cout << MV[i][k] << "  ";  // 同一行打印
       //   }
       //   std::cout << std::endl;  // 换行
-      // }    
-
-      std::cout<<"局部矩阵反演完成,迭代 "<<iter+1<<std::endl;
-
+      // } 
+      
       // 3) 全局系统装配
       assembleGlobalSystem(
-        temperature,
+        state.Temperature,
         MV, ML, muV, muL,
         nV, nL,
         elementMatrix,
-        feedComposition, 
-        Acoef, rhs
-      );  
-      std::cout<<"全局系统装配完成,迭代 "<<iter+1<<std::endl;
-      // for(size_t i = 0; i < rhs.size(); ++i) {
-      //   std::cout << "rhs[" << i << "] = " << rhs[i] << std::endl;
-      // }
+        state.moleNumbers,   // 进料 n^F
+        Acoef,
+        rhs
+      );
+      std::cout<<"rhs: ";
+      for(size_t i =0 ; i < rhs.size() ; ++i){
+        std::cout<<rhs[i]<<"  ";
+      }
+      std::cout<<std::endl;
+      std::cout << "全局系统装配完成, 迭代 " << (iter+1) << std::endl;
 
-      // === 4) 解线性系统 ===
+      // 4) 解线性系统
       double lin_resid = 0.0;
       sol = solveGlobalLinearSystem(Acoef, rhs, &lin_resid);
-      // 这里保留原来的迭代号打印
-      std::cout << "线性系统求解完成,迭代 " << iter+1 << std::endl;
+      std::cout << "线性系统求解完成, 迭代 " << (iter+1) << std::endl;
 
       // 拆解解向量：[Δλ_1…Δλ_E, Δβ_v, Δβ_l]
       Lambda.assign(sol.begin(), sol.begin() + E);
       deltaBeta[0] = sol[E];
       deltaBeta[1] = sol[E+1];
+
       std::cout << "  Lambda: ";
       for (double dl : Lambda) std::cout << dl << " ";
       std::cout << "\n  deltaBeta_v=" << deltaBeta[0]
                 << "  deltaBeta_l=" << deltaBeta[1] << std::endl;
 
-      // === 5) 回代恢复 Δn 并输出 Δn ===
-      // 保持原来的“更新前”块打印（你已有）
+      // 5) 回代恢复 Δn
       {
         double betaV_dbg = std::accumulate(nV.begin(), nV.end(), 0.0);
         double betaL_dbg = std::accumulate(nL.begin(), nL.end(), 0.0);
@@ -938,47 +1049,66 @@ FlashResult RandFlash::solveTwoPhase(
         for (double v : nV) std::cout << v << " ";
         std::cout << "\n  nL: ";
         for (double v : nL) std::cout << v << " ";
-        std::cout << "\n  betaV: " << betaV_dbg << ", betaL: " << betaL_dbg;
+        std::cout << "\n  betaV: " << betaV_dbg
+                  << ", betaL: " << betaL_dbg;
         std::cout << "\n  xV: ";
-        for (double v : nV) std::cout << v/betaV_dbg << " ";
+        for (double v : nV) std::cout << v / betaV_dbg << " ";
         std::cout << "\n  xL: ";
-        for (double v : nL) std::cout << v/betaL_dbg << " ";
+        for (double v : nL) std::cout << v / betaL_dbg << " ";
         std::cout << std::endl;
       }
 
       backSubstituteDeltas(
-        temperature, elementMatrix, MV, ML, muV, muL,
-        nV, nL, Lambda, deltaBeta, dnV, dnL);
+        state.Temperature,
+        elementMatrix,
+        MV, ML,
+        muV, muL,
+        nV, nL,
+        Lambda,
+        deltaBeta,
+        dnV, dnL
+      );
 
-      // === 6) 线搜索 + 更新 ===
+      // 6) 线搜索 + 更新
       double alpha = applyUpdate(
-        temperature, muV, muL, dnV, dnL, nV, nL);
+        state.Temperature,
+        muV, muL,
+        dnV, dnL,
+        nV, nL
+      );
 
-      // === 7) 收敛判断 ===
-      {
-        auto conv = checkConvergence(
-          iter + 1 , tol, muV, muL, elementMatrix, nV, nL, feedComposition);
-        // 原逻辑：同时满足两个阈值才收敛
-        if (conv.converged) {
-          double betaV = std::accumulate(nV.begin(), nV.end(), 0.0);
-          double betaL = std::accumulate(nL.begin(), nL.end(), 0.0);
-          result.success           = true;
-          result.vaporFraction     = betaV / (betaV + betaL);
-          result.vaporComposition  = nV;
-          result.liquidComposition = nL;
-          result.iterations        = iter + 1;
-          result.convergenceError  = conv.max_mu_diff;
-          return result;
-        }
+      // 7) 收敛判断
+      auto conv = checkConvergence(
+        iter + 1,
+        tol,
+        muV, muL,
+        elementMatrix,
+        nV, nL,
+        state.moleNumbers
+      );
+
+      if (conv.converged) {
+        double betaV_fin = std::accumulate(nV.begin(), nV.end(), 0.0);
+        double betaL_fin = std::accumulate(nL.begin(), nL.end(), 0.0);
+        result.success           = true;
+        result.vaporFraction     = betaV_fin / (betaV_fin + betaL_fin);
+        result.vaporComposition  = nV;
+        result.liquidComposition = nL;
+        result.iterations        = iter + 1;
+        result.convergenceError  = conv.max_mu_diff;
+        return result;
       }
     }
-  } catch (const std::exception& e){
-    std::cerr << "[RandFlash] Exception caught during iterations: " << e.what() << std::endl;
+  } catch (const std::exception& e) {
+    std::cerr << "[RandFlash] Exception caught during iterations: "
+              << e.what() << std::endl;
     result.success = false;
     return result;
   }
-  // 若未收敛
+
+  // 若 maxIter 内未收敛
   result.success = false;
   return result;
 }
+
 

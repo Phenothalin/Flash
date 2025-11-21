@@ -1,5 +1,5 @@
 #pragma once
-#include "thermo_adapter.hpp"
+#include "thermo_backend.hpp"
 #include "linear_solver.hpp"
 #include <vector>
 #include <memory>
@@ -27,6 +27,12 @@ struct PhaseFixResult {
   std::vector<std::vector<double>> M_fixed;
 };
 
+struct PhaseContext {
+  thermo::PhaseState state;              // T, P, n, phaseFlag
+  std::vector<std::vector<double>> m;    // 局部 m 矩阵
+  std::vector<double> mu;               // 化学势
+};
+
 struct FlashResult {
   bool success = false;
   double pressure = 0.0;
@@ -52,38 +58,38 @@ struct MultiFlashResult {
 };
 
 class RandFlash {
-public:
-  RandFlash(
-    PropertyPackageType packageType,
-    std::shared_ptr<material_object::Cluster> componentCluster,
-    ls::LinearSolverInterface& linearSolver);
+  public:
+    RandFlash(thermo::IThermoBackend& thermo,
+      ls::LinearSolverInterface& linearSolver);
 
-  FlashResult solveTwoPhase(
-    double pressure,
-    double temperature,
-    const std::vector<double>& feedComposition,
-    const std::vector<std::vector<double>>& elementMatrix, // E×C 元素映射
-    const std::vector<double>& initialVaporComposition = {},  // 新增：气相初始组成
-    const std::vector<double>& initialLiquidComposition = {},// 新增：液相初始组成
-    int maxIterations = 50,
-    double tolerance    = 1e-8);
+    FlashResult solveTwoPhase(
+        const thermo::PhaseState& state,
+        const std::vector<std::vector<double>>& elementMatrix,
+        const std::vector<double>& initialVaporComposition = {},
+        const std::vector<double>& initialLiquidComposition = {},
+        int maxIterations = 50,
+        double tolerance = 1e-8);
+        
+      // 用于“收敛判断”的返回
+      struct ConvergenceInfo {
+        double max_mu_diff;   // max |muV[i]-muL[i]|
+        double elem_error;    // || A*(nV+nL-feed) ||_inf
+        bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
+      };
+
+      // RandFlash(const RandFlash&) = delete;
+      // RandFlash& operator=(const RandFlash&) = delete;
     
-  // 用于“收敛判断”的返回
-  struct ConvergenceInfo {
-    double max_mu_diff;   // max |muV[i]-muL[i]|
-    double elem_error;    // || A*(nV+nL-feed) ||_inf
-    bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
-  };
+      // // 如有需要，允许移动（方便以后放在容器里）
+      // RandFlash(RandFlash&&) = default;
+      // RandFlash& operator=(RandFlash&&) = default;
 
-private:
-  thermo::PropertyPackageAdapter vaporModel_, liquidModel_;
+  private:
+  // std::shared_ptr<thermo::IThermoBackend> thermo_;
+  thermo::IThermoBackend& thermo_;
   ls::LinearSolverInterface& linearSolver_;
 
-  void assembleLocalJacobian(
-    double temperature,
-    double pressure,
-    std::vector<double>& moleNumbers,
-    thermo::PropertyPackageAdapter& model,
+  void assembleLocalJacobian(const thermo::PhaseState& state,
     std::vector<std::vector<double>>& m,
     std::vector<double>& mu);
 
@@ -101,10 +107,7 @@ private:
     std::vector<double>& rhs);
   
   InitResult initializeTwoPhase(
-    double pressure,
-    double temperature,
     const std::vector<double>& feed,                       // 进料各组分摩尔数
-    const std::vector<std::vector<double>>& elementMatrix, // A 矩阵
     const std::vector<double>& vaporGuess,                 // 允许空
     const std::vector<double>& liquidGuess,                // 允许空
     double margin = 1e-3) const;                           // 远离边界的小裕度
@@ -171,62 +174,6 @@ private:
     const std::vector<double>& nV,
     const std::vector<double>& nL,
     const std::vector<double>& feedComposition) const;
-  };
-
-class RandMultiphase {
-  public:
-  struct Options {
-    int max_newton_iter; // Newton iters for a fixed phase count
-    int max_addremove_cycles; // Outer cycles for add/remove phases
-    double tol_mu; // μ spread tolerance
-    double tol_elem; // element residual tolerance
-    double remove_phase_tol_rel; // remove phase if beta < rel * Ftot
-    double line_alpha_min; // min line-search step
-    double line_shrink; // backtracking shrink
-    double jitter_scale; // small diagonal regularization
-    int max_phases; // safety cap on phases
-    bool verbose; // print progress to std::cout
-    
-    
-    Options()
-    : max_newton_iter(50)
-    , max_addremove_cycles(6)
-    , tol_mu(1e-8)
-    , tol_elem(1e-8)
-    , remove_phase_tol_rel(1e-12)
-    , line_alpha_min(1e-12)
-    , line_shrink(0.5)
-    , jitter_scale(1e-6)
-    , max_phases(5)
-    , verbose(true) {}
-    };
-  
-  
-  RandMultiphase(
-  PropertyPackageType packageType,
-  std::shared_ptr<material_object::Cluster> componentCluster,
-  ls::LinearSolverInterface& linearSolver,
-  const Options& opt = Options{});
-  
-  
-  ~RandMultiphase();
-  
-  
-  // Solve isothermal-isobaric flash with automatic phase count discovery.
-  // feed: absolute moles (size C). elementMatrix: E x C.
-  // initial_x: optional initial phase compositions (each size C, sum=1). If empty,
-  // solver starts from a symmetric 2-phase split with x=z.
-  MultiFlashResult solvePT(
-  double pressure,
-  double temperature,
-  const std::vector<double>& feed,
-  const std::vector<std::vector<double>>& elementMatrix,
-  const std::vector<std::vector<double>>& initial_x = {});
-  
-  
-  private:
-  struct Impl; // PImpl to keep header light & ABI-stable
-  std::unique_ptr<Impl> impl_; // defined in rand_multiphase.cpp
   };
 
 } // namespace randflash

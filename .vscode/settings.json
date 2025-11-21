@@ -6,9 +6,9 @@
       "cmake.configureEnvironment": {
         "THERMOPACK_DIR": "/Users/madao/code/thermopack"
       },
-      "cmake.buildEnvironment": {
-        "DYLD_LIBRARY_PATH": "/Users/madao/code/thermopack/installed"
-      },    
+    //   "cmake.buildEnvironment": {
+    //     "DYLD_LIBRARY_PATH": "/Users/madao/code/thermopack/installed"
+    //   },    
     "files.associations": {
         "cmath": "cpp",
         "limits": "cpp",

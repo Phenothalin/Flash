@@ -1,0 +1,87 @@
+// tests/randflash_tp_two_phase.cpp
+#include <iostream>
+#include <vector>
+#include <memory>
+
+#include "rand_flash.hpp"
+#include "thermo_backend.hpp"
+#include "linear_solver.hpp"
+
+int main() {
+  try {
+    // 1) 构建 ThermoPack 后端：这里用 Peng-Robinson + vdW + Classic alpha
+    // 组分顺序要和你的 feed z 保持一致
+    std::string comps =
+      "N2,CO2,C1,C2,C3,"
+      "iC4,nC4,iC5,nC5,nC6,nC7";
+
+    thermo::ThermoPackBackend backend(
+      comps, "PR", "vdW", "Classic", "Default", false);
+
+    // 2) 线性求解器（和你以前单相/两相测试一致）
+    auto linSolverPtr = ls::createEigenSolver();
+    randflash::RandFlash flash(backend, *linSolverPtr);
+
+    // 3) 进料条件：T, P, 总摩尔组成（用你之前那个 11 组分例子）
+    double T = 295.0;      // K
+    double P = 2.0e6;      // Pa
+    std::vector<double> z = {
+      0.000001, 0.015, 0.55, 0.14, 0.12,
+      0.05, 0.045, 0.03, 0.025, 0.012, 0.01
+    };
+
+    const size_t C = z.size();
+
+    // 设总进料为 1 mol（你后面算法只看比例，这里 1 mol 就够）
+    std::vector<double> nFeed(C);
+    double totalFeed = 1.0;
+    for (size_t i = 0; i < C; ++i) nFeed[i] = z[i] * totalFeed;
+
+    // 4) 构造 PhaseState（相标记对整体 feed 无意义，这里设 -1）
+    thermo::PhaseState feedState{T, P, nFeed, -1};
+
+    // 5) elementMatrix：这里用单位矩阵，表示“每个成分各自守恒”
+    std::vector<std::vector<double>> elementMatrix(C, std::vector<double>(C, 0.0));
+    for (size_t i = 0; i < C; ++i) elementMatrix[i][i] = 1.0;
+
+    // 6) 初始相组成：留空，让 initializeTwoPhase 自己生成（你已在其内部处理）
+    std::vector<double> initVapor;   // empty -> fallback
+    std::vector<double> initLiquid;  // empty -> fallback
+
+    int    maxIter = 20;
+    double tol     = 1e-8;
+
+    auto res = flash.solveTwoPhase(
+      feedState,
+      elementMatrix,
+      initVapor,
+      initLiquid,
+      maxIter,
+      tol
+    );
+
+    if (!res.success) {
+      std::cerr << "[Test] solveTwoPhase did not converge.\n";
+      return 1;
+    }
+
+    std::cout << "[Test] solveTwoPhase converged in "
+              << res.iterations << " iterations.\n";
+    std::cout << "  T = " << res.temperature
+              << " K, P = " << res.pressure << " Pa\n";
+    std::cout << "  vapor fraction = " << res.vaporFraction << "\n";
+
+    std::cout << "  vapor composition (nV): ";
+    for (double nv : res.vaporComposition) std::cout << nv << " ";
+    std::cout << "\n";
+
+    std::cout << "  liquid composition (nL): ";
+    for (double nl : res.liquidComposition) std::cout << nl << " ";
+    std::cout << "\n";
+
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "[Test] Exception: " << e.what() << "\n";
+    return 1;
+  }
+}
