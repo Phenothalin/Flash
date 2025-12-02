@@ -112,7 +112,7 @@ public:
              const std::vector<double>& n_or_x,
              int phase) const
   {
-    std::cout<<"调用chemicalPotentials前 phaseFlag"<<phase<<std::endl;
+    // std::cout<<"调用chemicalPotentials前 phaseFlag"<<phase<<std::endl;
     auto nx = normalize_n(n_or_x);
     const auto& x = nx.first;
     const double RT = R_CONST * T;
@@ -120,11 +120,10 @@ public:
     auto prop = eos_.thermo(T, P, x, phase, /*dlnfugdt*/false,
                                       /*dlnfugdp*/false,
                                       /*dlnfugdn*/false);
-    // ★★ 把下面这一行改成你本地 VectorProperty 的公开 getter 名字（常见：value() / values()）
     const std::vector<double>& lnphi = prop.value();
-    for(size_t i = 0; i < lnphi.size() ; ++i){
-      std::cout<<lnphi[i]<<"  ";
-    }
+    // for(size_t i = 0; i < lnphi.size() ; ++i){
+    //   std::cout<<lnphi[i]<<"  ";
+    // }
     std::cout<<std::endl;
     // 2) μ = RT * ( ln f = lnφ + ln x + ln p )
     std::vector<double> muRT(lnphi.size());

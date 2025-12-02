@@ -75,11 +75,19 @@ target_link_libraries(randflash PUBLIC
   Eigen3::Eigen
 )
 
-add_executable(2phase_rand tests/2phase_rand.cpp)
-target_link_libraries(2phase_rand 
+add_executable(2phase_rand_test tests/2phase_rand_test.cpp)
+target_link_libraries(2phase_rand_test 
                     PUBLIC thermopack 
                     PRIVATE randflash)
 
+add_executable(compressibility_factor_test tests/compressibility_factor_test.cpp)
+target_include_directories(compressibility_factor_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(compressibility_factor_test PRIVATE
+  thermopack
+  Eigen3::Eigen
+)                    
 # ===================== ThermoPack 热力学测试 =====================
 if(BUILD_TP_SANITY_TEST)
   add_executable(tp_thermo_check tests/tp_thermo_check.cpp)

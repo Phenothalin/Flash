@@ -42,14 +42,32 @@ make_dlnx_dn(const std::vector<double>& n){
 int main(){
   // 1) 选择 EoS 与物系（示例：天然气常见组分）
   // 构造函数签名见 cubic.h: Cubic(comps, eos, mixing="vdW", alpha="Classic", ref="Default", volume_shift=false)
-  Cubic eos("C1,C2,C3,iC4,nC4,iC5,nC5",
+  Cubic eos("N2,CO2,C1,C2,C3,iC4,nC4,iC5,nC5,nC6,nC7",
             "PR", "vdW", "Classic", "Default", false);
 
   // 2) 条件与组成
   const double T = 295.0;            // K
   const double p = 2.0e6;            // Pa
-  std::vector<double> z = {0.01, 0.02, 0.70, 0.12, 0.08, 0.05, 0.02};
+  std::vector<double> z = {0.03, 0.015, 0.55, 0.14, 0.12,0.05, 0.045, 0.03, 0.025, 0.012, 0.01};
   std::vector<double> x0 = normalize(z);
+
+  auto prop_vap = eos.thermo(T, p, z, eos.VAPPH, /*dlnfugdt*/false, /*dlnfugdp*/false, /*dlnfugdn*/false);
+  auto prop_liq = eos.thermo(T, p, z, eos.LIQPH, /*dlnfugdt*/false, /*dlnfugdp*/false, /*dlnfugdn*/false);
+  const std::vector<double>& lnphi_vap = prop_vap.value();
+  const std::vector<double>& lnphi_liq = prop_liq.value();
+  for(size_t i = 0; i < lnphi_vap.size() ; ++i){
+    std::cout<<lnphi_vap[i]<<"  ";
+  }
+  std::cout<<std::endl;
+  for(size_t i = 0; i < lnphi_liq.size() ; ++i){
+    std::cout<<lnphi_liq[i]<<"  ";
+  }
+  std::cout<<std::endl;
+
+  auto z_vap = eos.zfac(T, p, z, eos.VAPPH);
+  auto z_liq = eos.zfac(T, p, z, eos.LIQPH);
+  std::cout << "Z_vap = " << z_vap.value()
+            << ", Z_liq = " << z_liq.value() << std::endl;
 
   // 3) 先做两相 TP-flash，拿到两相组成（以便分别在两相上评估导数）
   auto fr = eos.two_phase_tpflash(T, p, x0);

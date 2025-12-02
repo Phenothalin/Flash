@@ -108,6 +108,8 @@ class RandFlash {
   
   InitResult initializeTwoPhase(
     const std::vector<double>& feed,                       // 进料各组分摩尔数
+    const double Temprarue,
+    const double Pressure,                  
     const std::vector<double>& vaporGuess,                 // 允许空
     const std::vector<double>& liquidGuess,                // 允许空
     double margin = 1e-3) const;                           // 远离边界的小裕度

@@ -99,7 +99,7 @@ static PhaseFixResult fix_phase_hessian_one_phase(
   double lam_min = es0.eigenvalues()(0); // 升序
   PhaseFixResult out;
   out.lam_min_before = lam_min;
-
+  // std::cout<<"min_lam = "<<out.lam_min_before<<std::endl;
   double add = 0.0;
   Eigen::MatrixXd mt_fixed = mt;
   if (lam_min < opt.eig_floor){
@@ -181,6 +181,8 @@ RandFlash::RandFlash(thermo::IThermoBackend& thermo,
 // ---- in rand_flash.cpp ----
 InitResult RandFlash::initializeTwoPhase(
   const std::vector<double>& feed,
+  const double Temperature,
+  const double Pressure,
   const std::vector<double>& vaporGuess,
   const std::vector<double>& liquidGuess,
   double margin) const
@@ -328,84 +330,76 @@ InitResult RandFlash::initializeTwoPhase(
     return out;
   }
 
-  // 案例 D：都没给 —— 回退到 50/50 平分，并沿“轻 → 气、重 → 液”的方向打破对称
+  // 案例 D：既没有给 y 也没有给 x —— 用 Thermopack 的 Wilson K 做两相初始化
   {
-    const double alpha = 0.2;        // 指数扰动强度（控制轻/重偏向）
-    const double tiltStrength = 0.5; // 0<tiltStrength<=1，控制从 50/50 偏离的幅度
+    // 1) feed mole fraction z 已经在函数开头算过：z[i] = feed[i] / Ftot;
 
-    // 1) 进料摩尔分率 xFeed
-    std::vector<double> xFeed(C);
-    double nTot = std::accumulate(feed.begin(), feed.end(), 0.0);
-    if (nTot <= 0.0) {
-      throw std::runtime_error("initializeTwoPhase: total feed is non-positive in case D");
-    }
-    for (size_t i = 0; i < C; ++i) {
-      xFeed[i] = feed[i] / nTot;
+    // 2) Thermopack 计算 Wilson K 值
+    std::vector<double> K(C, 0.0);
+    {
+      double T = Temperature; // 或改成传进来的 T
+      double P = Pressure; // 或改成传进来的 P
+      thermopack_wilsonk_c(&T, &P, K.data());
     }
 
-    // 2) 基于轻/重指数的“倾向性”分布（只是用来产生扰动方向）
-    std::vector<double> wV(C), wL(C);
-    for (size_t i = 0; i < C; ++i) {
-      // 把“越轻”(索引小)的组分往气相推一点，重的往液相推一点
-      double heaviness = static_cast<double>(i);
-      wV[i] = xFeed[i] * std::exp(-alpha * heaviness);
-      wL[i] = xFeed[i] * std::exp(+alpha * heaviness);
-    }
-    // 用前面定义的 normalized(...) lambda 做归一
-    wV = normalized(wV);
-    wL = normalized(wL);
-
-    // 3) 用 wV - wL 生成一个零均值（按 xFeed 加权）的扰动方向 w_i
-    std::vector<double> d(C);
-    for (size_t i = 0; i < C; ++i) {
-      d[i] = wV[i] - wL[i]; // 轻组分 d>0，重组分 d<0
-    }
-
-    double mu = 0.0;
-    for (size_t i = 0; i < C; ++i) {
-      mu += xFeed[i] * d[i];  // xFeed 加权平均
-    }
-
-    std::vector<double> w(C);
-    double maxAbsW = 0.0;
-    for (size_t i = 0; i < C; ++i) {
-      w[i] = d[i] - mu;                    // 保证 Σ xFeed[i] * w[i] = 0
-      maxAbsW = std::max(maxAbsW, std::fabs(w[i]));
-    }
-
-    // 4) 构造扰动 ε_i，使：
-    //    y0_i = xFeed_i + ε_i
-    //    x0_i = xFeed_i - ε_i
-    //    Σ ε_i = 0, 且 |ε_i| ≤ tiltStrength * xFeed_i
-    std::vector<double> eps(C, 0.0);
-    if (maxAbsW > 0.0 && tiltStrength > 0.0) {
-      const double k = tiltStrength / maxAbsW; // 控制最大相对偏移不超过 tiltStrength
+    // 3) 用 Rachford-Rice ∑ z_i (K_i-1)/(1+β(K_i-1)) = 0 解出蒸汽分率 β ∈ [0,1]
+    auto rr = [&](double beta) {
+      double s = 0.0;
       for (size_t i = 0; i < C; ++i) {
-        double e = k * xFeed[i] * w[i];
-        const double bound = tiltStrength * xFeed[i];
-        if (e >  bound) e =  bound;
-        if (e < -bound) e = -bound;
-        eps[i] = e;
+        const double d = K[i] - 1.0;
+        double denom = 1.0 + beta * d;
+        if (denom < 1e-12) denom = 1e-12; // 数值保护
+        s += z[i] * d / denom;
       }
+      return s;
+    };
+
+    double beta_lo = margin;
+    double beta_hi = 1.0 - margin;
+    double f_lo = rr(beta_lo);
+    double f_hi = rr(beta_hi);
+
+    double beta = 0.5 * (beta_lo + beta_hi);
+
+    // 如果区间两端同号，说明 Wilson 在此 T,P 下不太“像两相”，简单退回 β=0.5
+    if (f_lo * f_hi < 0.0) {
+      for (int it = 0; it < 40; ++it) {
+        beta = 0.5 * (beta_lo + beta_hi);
+        double f = rr(beta);
+        if (std::fabs(f) < 1e-12) break;
+        if (f * f_lo > 0.0) {
+          beta_lo = beta;
+          f_lo = f;
+        } else {
+          beta_hi = beta;
+          f_hi = f;
+        }
+      }
+    } else {
+      beta = 0.5; // 单相附近 → 随便给个 0.5 的两相初值
     }
 
-    // 5) 得到两相的摩尔分率 y0 / x0：
-    //    - 轻组分在气相略多，在液相略少
-    //    - 且对每个 i 有 y0_i + x0_i = 2 xFeed_i
-    out.y0.assign(C, 0.0);
+    // 4) 根据 β 和 K 求 x_i / y_i
     out.x0.assign(C, 0.0);
+    out.y0.assign(C, 0.0);
     for (size_t i = 0; i < C; ++i) {
-      out.y0[i] = xFeed[i] + eps[i];
-      out.x0[i] = xFeed[i] - eps[i];
+      const double d = K[i] - 1.0;
+      double denom = 1.0 + beta * d;
+      if (denom < 1e-12) denom = 1e-12;
+      out.x0[i] = z[i] / denom;
+      out.y0[i] = K[i] * out.x0[i];
+      if (out.x0[i] < 0.0) out.x0[i] = 0.0;
+      if (out.y0[i] < 0.0) out.y0[i] = 0.0;
     }
 
-    // 6) 50/50 分相（总摩尔数各一半）
-    out.betaV = 0.5 * Ftot;
-    out.betaL = 0.5 * Ftot;
+    // 轻度归一，消除数值误差
+    out.x0 = normalized(out.x0);
+    out.y0 = normalized(out.y0);
 
-    // 7) 按 y0/x0 分配 nV / nL：
-    //    在 Ftot = Σ feed 的前提下，对每个组分 i 有：
-    //    nV_i + nL_i = Ftot * xFeed_i = feed_i
+    // 5) 转成 nV / nL
+    out.betaV = beta * Ftot;
+    out.betaL = (1.0 - beta) * Ftot;
+
     out.nV.resize(C);
     out.nL.resize(C);
     for (size_t i = 0; i < C; ++i) {
@@ -415,6 +409,7 @@ InitResult RandFlash::initializeTwoPhase(
 
     return out;
   }
+
 
 
 }
@@ -916,6 +911,8 @@ randflash::FlashResult RandFlash::solveTwoPhase(
   std::vector<double> nV(C), nL(C);
   auto init = initializeTwoPhase(
       state.moleNumbers,
+      state.Temperature,
+      state.Pressure,
       initialVaporComposition,
       initialLiquidComposition,
       /*margin=*/1e-3);
@@ -930,7 +927,7 @@ randflash::FlashResult RandFlash::solveTwoPhase(
   // 2) 构造两相的 PhaseState（phaseFlag 用 backend 提供的 vapor/liquid 标志）
   thermo::PhaseState vap{state.Temperature, state.Pressure, nV, thermo_.vaporPhaseFlag()};
   thermo::PhaseState liq{state.Temperature, state.Pressure, nL, thermo_.liquidPhaseFlag()};
-  std::cout<<"构造两相PhaseState的 phaseFlag  "<<thermo_.vaporPhaseFlag()<<"  "<<thermo_.liquidPhaseFlag()<<std::endl;
+  // std::cout<<"构造两相PhaseState的 phaseFlag  "<<thermo_.vaporPhaseFlag()<<"  "<<thermo_.liquidPhaseFlag()<<std::endl;
   
   FlashResult result;
   result.pressure        = state.Pressure;
