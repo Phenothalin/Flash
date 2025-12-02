@@ -339,7 +339,7 @@ InitResult RandFlash::initializeTwoPhase(
     {
       double T = Temperature; // 或改成传进来的 T
       double P = Pressure; // 或改成传进来的 P
-      thermopack_wilsonk_c(&T, &P, K.data());
+      thermo_.wilsonK(T, P, K);
     }
 
     // 3) 用 Rachford-Rice ∑ z_i (K_i-1)/(1+β(K_i-1)) = 0 解出蒸汽分率 β ∈ [0,1]

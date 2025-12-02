@@ -19,6 +19,7 @@ public:
   virtual ~IThermoBackend() = default;
 
   virtual std::vector<double> chemicalPotentials(const PhaseState& st) const = 0;     
+  virtual void wilsonK(double T, double P, std::vector<double>& K) const = 0;
 
   // d(μ/RT)/dn: nc x nc
   virtual std::vector<std::vector<double>> dmu_dn(const PhaseState& st) const = 0;
@@ -45,7 +46,9 @@ class ThermoPackBackend : public IThermoBackend {
     {
       return tp_.chemicalPotentials(st.Temperature, st.Pressure, st.moleNumbers, st.phaseFlag);
     }
-
+    void wilsonK(double T, double P, std::vector<double>& K) const override {
+      tp_.wilsonK(T, P, K);
+    }
     std::vector<std::vector<double>> dmu_dn(const PhaseState& st) const override
     {
       return tp_.dmu_dn(st.Temperature, st.Pressure, st.moleNumbers, st.phaseFlag);

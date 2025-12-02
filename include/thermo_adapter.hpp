@@ -137,7 +137,10 @@ public:
     return mu;
   }
   
-
+ // -------- 5) Wilson K 值 --------
+  void wilsonK(double T, double P, std::vector<double>& K) const{
+    eos_.wilsonK(T, P, K);
+  }
 private:
   // 直接用 ThermoPack 的 Cubic 封装（构造时已选定 PR/SRK 等）
   Cubic eos_;
