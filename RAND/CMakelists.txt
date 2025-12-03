@@ -1,0 +1,60 @@
+# RAND 层：RandFlash 多组分两相/多相闪蒸
+
+file(GLOB RAND_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/eigen.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/rand_flash.cpp"
+)
+file(GLOB RAND_HEADERS
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+)
+
+add_library(randflash STATIC
+    ${RAND_SOURCES}
+    ${RAND_HEADERS}
+)
+
+target_include_directories(randflash
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+# RandFlash 依赖 RR 和 Thermo（Thermo 再往下依赖 thermopack + Eigen）
+target_link_libraries(randflash
+    PUBLIC
+      thermo
+      Eigen3::Eigen
+)
+
+# ===================== RAND 测试 =====================
+
+add_executable(2phase_rand_test
+    tests/2phase_rand_test.cpp
+)
+
+target_include_directories(2phase_rand_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(2phase_rand_test
+    PRIVATE
+      randflash
+)
+
+# add_executable(rand_flash_test
+#     tests/rand_flash_test.cpp
+# )
+
+# target_include_directories(rand_flash_test
+#     PRIVATE
+#       ${CMAKE_CURRENT_SOURCE_DIR}/include
+#       ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+# )
+
+# target_link_libraries(rand_flash_test
+#     PRIVATE
+#       randflash
+# )

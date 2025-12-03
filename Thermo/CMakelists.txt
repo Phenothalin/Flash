@@ -1,0 +1,99 @@
+# Thermo 层：封装 thermopack，提供 C++ backend
+
+# 收集源码和头文件（你可以改成手动列出）
+file(GLOB THERMO_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+)
+file(GLOB THERMO_HEADERS
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+)
+
+if(THERMO_SOURCES)
+  # 有 .cpp 的情况：正常生成静态库
+  add_library(thermo STATIC
+      ${THERMO_SOURCES}
+      ${THERMO_HEADERS}
+  )
+
+  target_include_directories(thermo
+      PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  target_link_libraries(thermo
+      PUBLIC
+        thermopack
+        Eigen3::Eigen
+  )
+else()
+  # 暂时没有源码：做成 header-only 的 INTERFACE 库
+  add_library(thermo INTERFACE)
+
+  target_include_directories(thermo
+      INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  target_link_libraries(thermo
+      INTERFACE
+        thermopack
+        Eigen3::Eigen
+  )
+endif()
+
+# ===================== 测试程序 =====================
+
+# 1) 压缩因子 / 基本 EOS 测试
+add_executable(compressibility_factor_test
+    tests/compressibility_factor_test.cpp
+)
+
+target_include_directories(compressibility_factor_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(compressibility_factor_test
+    PRIVATE
+      thermopack
+      Eigen3::Eigen
+)
+
+# 2) ThermoPack sanity check（可开关）
+if(BUILD_TP_SANITY_TEST)
+  add_executable(tp_thermo_check
+      tests/tp_thermo_check.cpp
+  )
+
+  target_include_directories(tp_thermo_check
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  target_link_libraries(tp_thermo_check
+      PRIVATE
+        thermopack
+        Eigen3::Eigen
+  )
+
+  # macOS 下修 RPATH，方便找到 thermopack 的 dylib
+  if(APPLE)
+    get_target_property(_TP_LIB thermopack LOCATION)
+    get_filename_component(_TP_LIBDIR "${_TP_LIB}" DIRECTORY)
+
+    set_target_properties(tp_thermo_check PROPERTIES
+      BUILD_WITH_INSTALL_RPATH ON
+      BUILD_RPATH "${_TP_LIBDIR}"
+      INSTALL_RPATH "${_TP_LIBDIR};@loader_path"
+    )
+  endif()
+
+  # Windows：把 thermopack DLL 复制到可执行所在目录（如有需要）
+  if(WIN32)
+    add_custom_command(TARGET tp_thermo_check POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:thermopack> $<TARGET_FILE_DIR:tp_thermo_check>
+    )
+  endif()
+endif()

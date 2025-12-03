@@ -1,0 +1,45 @@
+# RR 层：Rachford–Rice 闪蒸
+
+file(GLOB RR_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+)
+file(GLOB RR_HEADERS
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+)
+
+add_library(rrflash STATIC
+    ${RR_SOURCES}
+    ${RR_HEADERS}
+)
+
+target_include_directories(rrflash
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+# RR 一般只需要 Eigen；如果内部通过 thermo_backend 用 thermopack，
+# 也可以把 thermo 链上（PUBLIC 透传给上游）
+target_link_libraries(rrflash
+    PUBLIC
+      thermo         # 如果 RR 里用到 thermo backend，就留着
+      Eigen3::Eigen
+)
+
+# ===================== RR 测试 =====================
+
+add_executable(RRflash_test
+    tests/RRflash_test.cpp
+)
+
+target_include_directories(RRflash_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(RRflash_test
+    PRIVATE
+      rrflash
+)

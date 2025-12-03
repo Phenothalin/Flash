@@ -1,21 +1,17 @@
 cmake_minimum_required(VERSION 3.18)
 
 # ===================== vcpkg 工具链 & triplet =====================
-# 要求 VCPKG_ROOT 已经在环境变量里设置好
 if(NOT DEFINED ENV{VCPKG_ROOT})
   message(FATAL_ERROR "VCPKG_ROOT not set. Please export VCPKG_ROOT first.")
 endif()
 
-# 在 project() 之前指定 vcpkg 工具链
 set(CMAKE_TOOLCHAIN_FILE
     "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
     CACHE STRING "Vcpkg toolchain file"
 )
 
-# 如果外部没显式指定 VCPKG_TARGET_TRIPLET，这里给一个合理默认
 if(NOT DEFINED VCPKG_TARGET_TRIPLET)
   if(APPLE)
-    # 你现在是 Apple Silicon，只看到 arm64-osx 这个目录
     set(VCPKG_TARGET_TRIPLET "arm64-osx" CACHE STRING "vcpkg triplet" FORCE)
   elseif(WIN32)
     set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "vcpkg triplet" FORCE)
@@ -28,93 +24,24 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ===================== ThermoPack =====================
-# 让 CMake 能在 THERMOPACK_DIR 下找到 thermopack-config.cmake
 if(DEFINED ENV{THERMOPACK_DIR})
   list(PREPEND CMAKE_PREFIX_PATH "$ENV{THERMOPACK_DIR}")
 endif()
 
-# 使用 ThermoPack 的包配置（由 thermopack-config.cmake 提供）
 find_package(THERMOPACK CONFIG REQUIRED)
 
 # ===================== Eigen（通过 vcpkg） =====================
-# 这里用 CONFIG 模式，走 vcpkg 的 Eigen3Config.cmake
-# 注意：前面已经通过 VCPKG_TARGET_TRIPLET 把 triplet 固定到 arm64-osx，
-# vcpkg 工具链会自动把 $VCPKG_ROOT/installed/arm64-osx 加入搜索路径
 find_package(Eigen3 CONFIG REQUIRED)
 
-# 如果你想再保险一点，也可以顺便把 vcpkg 安装路径补进 CMAKE_PREFIX_PATH：
+# 为了保险，把 vcpkg 安装路径补进 CMAKE_PREFIX_PATH
 list(APPEND CMAKE_PREFIX_PATH
-     "$ENV{VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}")
+     "$ENV{VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}"
+)
 
-# ===================== 选项：是否编译 TP 测试 =====================
+# ===================== 选项：是否编译 ThermoPack 检查程序 =====================
 option(BUILD_TP_SANITY_TEST "Build ThermoPack sanity check test" ON)
 
-# 源文件
-set(RF_SOURCES
-  src/eigen.cpp
-  src/rand_flash.cpp
-)
-
-# 头文件（为了 IDE 索引）
-file(GLOB_RECURSE RF_HEADERS
-  include/*.h
-  include/*.hpp
-)
-# ===================== 主库 randflash =====================
-add_library(randflash STATIC
-            ${RF_SOURCES}
-            ${RF_HEADERS})
-target_include_directories(randflash PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-# 这里必须把 Eigen3::Eigen 链到 randflash，
-# 这样 rand_flash.cpp 里的 #include <Eigen/Dense> 才有 include path
-target_link_libraries(randflash PUBLIC
-  thermopack
-  Eigen3::Eigen
-)
-
-add_executable(2phase_rand_test tests/2phase_rand_test.cpp)
-target_link_libraries(2phase_rand_test 
-                    PUBLIC thermopack 
-                    PRIVATE randflash)
-
-add_executable(compressibility_factor_test tests/compressibility_factor_test.cpp)
-target_include_directories(compressibility_factor_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(compressibility_factor_test PRIVATE
-  thermopack
-  Eigen3::Eigen
-)                    
-# ===================== ThermoPack 热力学测试 =====================
-if(BUILD_TP_SANITY_TEST)
-  add_executable(tp_thermo_check tests/tp_thermo_check.cpp)
-  target_include_directories(tp_thermo_check PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-  target_link_libraries(tp_thermo_check PRIVATE
-    thermopack
-    Eigen3::Eigen
-  )
-
-  # macOS: embed rpath pointing to ThermoPack's dylib dir
-  if(APPLE)
-    get_target_property(_TP_LIB thermopack LOCATION)
-    get_filename_component(_TP_LIBDIR "${_TP_LIB}" DIRECTORY)
-
-    set_target_properties(tp_thermo_check PROPERTIES
-      BUILD_WITH_INSTALL_RPATH ON
-      BUILD_RPATH "${_TP_LIBDIR}"
-      INSTALL_RPATH "${_TP_LIBDIR};@loader_path"
-    )
-  endif()
-
-  # Windows: 生成后把 thermopack 的 DLL 复制到可执行旁边
-  if(WIN32)
-    add_custom_command(TARGET tp_thermo_check POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              $<TARGET_FILE:thermopack> $<TARGET_FILE_DIR:tp_thermo_check>)
-  endif()
-endif()
+# ===================== 子目录 =====================
+add_subdirectory(Thermo)
+# add_subdirectory(RR)
+add_subdirectory(RAND)
