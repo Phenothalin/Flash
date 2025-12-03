@@ -20,7 +20,7 @@ target_include_directories(randflash
       ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
 )
 
-# RandFlash 依赖 RR 和 Thermo（Thermo 再往下依赖 thermopack + Eigen）
+# RandFlash 依赖  Thermo（Thermo 再往下依赖 thermopack + Eigen）
 target_link_libraries(randflash
     PUBLIC
       thermo

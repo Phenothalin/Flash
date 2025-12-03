@@ -1,172 +1,396 @@
 #include "rand_flash.hpp"
 #include <numeric>
 #include <cmath>
+#include <cassert>
+#include <cstdlib>
+#include <stdexcept>
 using namespace randflash;
 using namespace ls;
 
 // 保证逐分量守恒 + 组分单纯形精确成立 (暂无使用)
 inline void enforce_component_balance_and_simplex(
-  Eigen::VectorXd& nV, Eigen::VectorXd& nL,
-  const Eigen::VectorXd& nFeed, // 全流程不变的进料逐分量摩尔数
+  std::vector<double>& nV, std::vector<double>& nL,
+  const std::vector<double>& nFeed, // 全流程不变的进料逐分量摩尔数
   double* betaV_out = nullptr, double* betaL_out = nullptr,
-  Eigen::VectorXd* xV_out = nullptr, Eigen::VectorXd* xL_out = nullptr)
+  std::vector<double>* xV_out = nullptr, std::vector<double>* xL_out = nullptr)
 {
   const int nc = static_cast<int>(nV.size());
-  assert(nc == nL.size() && nc == nFeed.size());
+  assert(nc == static_cast<int>(nL.size()) &&
+         nc == static_cast<int>(nFeed.size()));
 
   // 1) 逐分量裁剪，避免数值微负/微超
   for (int i = 0; i < nc; ++i) {
-      // 把 nV 限制在 [0, nF]
-      if (nV[i] < 0.0) nV[i] = 0.0;
-      if (nV[i] > nFeed[i]) nV[i] = nFeed[i];
-      // 由守恒强制 nL
-      nL[i] = nFeed[i] - nV[i];
-      // 再保一次非负（理论上不会触发，防卫式）
-      if (nL[i] < 0.0) { nV[i] += nL[i]; nL[i] = 0.0; } // 把负数挪到另一相
-      if (nV[i] < 0.0) { nL[i] += nV[i]; nV[i] = 0.0; }
+    double nv = nV[i];
+    const double nf = nFeed[i];
+
+    // 把 nV 限制在 [0, nF]
+    if (nv < 0.0) nv = 0.0;
+    if (nv > nf)  nv = nf;
+    nV[i] = nv;
+
+    // 由守恒强制 nL
+    nL[i] = nf - nV[i];
+
+    // 再保一次非负（理论上不会触发，防卫式）
+    if (nL[i] < 0.0) { nV[i] += nL[i]; nL[i] = 0.0; }
+    if (nV[i] < 0.0) { nL[i] += nV[i]; nV[i] = 0.0; }
   }
 
   // 2) 精确计算 beta，并构造单纯形上的 x
-  const double betaV = nV.sum();
-  const double betaL = nL.sum();
+  double betaV = 0.0;
+  double betaL = 0.0;
+  for (int i = 0; i < nc; ++i) {
+    betaV += nV[i];
+    betaL += nL[i];
+  }
 
   if (betaV_out) *betaV_out = betaV;
   if (betaL_out) *betaL_out = betaL;
 
   if (xV_out) {
-    *xV_out = (betaV > 0.0 
-        ? (nV / betaV).eval()  // 强制除法表达式求值为VectorXd
-        : Eigen::VectorXd::Zero(nc)
-    );
+    xV_out->assign(nc, 0.0);
+    if (betaV > 0.0) {
+      const double invBetaV = 1.0 / betaV;
+      for (int i = 0; i < nc; ++i) {
+        (*xV_out)[i] = nV[i] * invBetaV;
+      }
+    }
   }
   if (xL_out) {
-      *xL_out = (betaL > 0.0 
-          ? (nL / betaL).eval()  // 同理，强制求值
-          : Eigen::VectorXd::Zero(nc)
-      );
+    xL_out->assign(nc, 0.0);
+    if (betaL > 0.0) {
+      const double invBetaL = 1.0 / betaL;
+      for (int i = 0; i < nc; ++i) {
+        (*xL_out)[i] = nL[i] * invBetaL;
+      }
+    }
   }
 }
 
 // === 构造切空间正交基 B: 1^T y = 0 ===
 // 用 (e_i - e_C) 做初基，再 Gram–Schmidt 正交化
-static Eigen::MatrixXd tangentBasis(int C){
-  Eigen::MatrixXd B = Eigen::MatrixXd::Zero(C, C-1);
-  for (int k=0;k<C-1;++k){ // 列 k
-    B(k,   k) =  1.0;
-    B(C-1,k) = -1.0;
+static std::vector<std::vector<double>> tangentBasis(int C){
+  std::vector<std::vector<double>> B(C, std::vector<double>(C-1, 0.0));
+
+  // 初始基：第 k 列为 e_k - e_C
+  for (int k = 0; k < C-1; ++k){ // 列 k
+    B[k][k]   =  1.0;
+    B[C-1][k] = -1.0;
   }
-  // Gram-Schmidt
-  for (int j=0;j<C-1;++j){
-    for (int i=0;i<j;++i){
-      double proj = B.col(i).dot(B.col(j));
-      B.col(j) -= proj * B.col(i);
-    }
-    double nrm = B.col(j).norm();
-    if (nrm < 1e-14) { // 退化保护
-      // 随机扰动再正交
-      B.col(j).setRandom();
-      for (int i=0;i<j;++i){
-        double proj = B.col(i).dot(B.col(j));
-        B.col(j) -= proj * B.col(i);
+
+  // Gram-Schmidt 正交化
+  for (int j = 0; j < C-1; ++j){
+    // 去除在之前列上的分量
+    for (int i = 0; i < j; ++i){
+      double proj = 0.0;
+      for (int r = 0; r < C; ++r) {
+        proj += B[r][i] * B[r][j];
       }
-      nrm = B.col(j).norm();
+      for (int r = 0; r < C; ++r) {
+        B[r][j] -= proj * B[r][i];
+      }
     }
-    B.col(j) /= nrm;
+
+    // 归一化
+    double nrm2 = 0.0;
+    for (int r = 0; r < C; ++r) {
+      nrm2 += B[r][j] * B[r][j];
+    }
+    double nrm = std::sqrt(nrm2);
+    if (nrm < 1e-14) { // 退化保护：随机扰动再正交
+      for (int r = 0; r < C; ++r) {
+        B[r][j] = static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX);
+      }
+      for (int i = 0; i < j; ++i){
+        double proj = 0.0;
+        for (int r = 0; r < C; ++r) {
+          proj += B[r][i] * B[r][j];
+        }
+        for (int r = 0; r < C; ++r) {
+          B[r][j] -= proj * B[r][i];
+        }
+      }
+      nrm2 = 0.0;
+      for (int r = 0; r < C; ++r) {
+        nrm2 += B[r][j] * B[r][j];
+      }
+      nrm = std::sqrt(nrm2);
+      if (nrm < 1e-14) {
+        throw std::runtime_error("tangentBasis: failed to build non-degenerate basis");
+      }
+    }
+    const double inv_nrm = 1.0 / nrm;
+    for (int r = 0; r < C; ++r) {
+      B[r][j] *= inv_nrm;
+    }
   }
-  // 检查 1^T B = 0
-  Eigen::VectorXd ones = Eigen::VectorXd::Ones(C);
-  Eigen::RowVectorXd check = ones.transpose()*B;
-  // 可加断言(略)
+
+  // 可选：检查 1^T B = 0，这里略
   return B;
 }
 
 // === 在切空间做 SPD 修正，并保持 m x = 1 ===
-
 static PhaseFixResult fix_phase_hessian_one_phase(
-  const std::vector<double>& x_std,                 // 相内 x
-  const std::vector<std::vector<double>>& m_in_std, // 相内 m
+  ls::LinearSolverInterface& solver,
+  const std::vector<double>& x,                 // 相内 x
+  const std::vector<std::vector<double>>& m_in, // 相内 m
   const PhaseFixOptions& opt = {})
-  {
-  const int C = (int)x_std.size();
-  Eigen::VectorXd x = toEig(x_std);
-  Eigen::MatrixXd m_in = toEig(m_in_std);
-  // 对称部
-  Eigen::MatrixXd ms = 0.5*(m_in + m_in.transpose());
-  // 切空间特征值
-  Eigen::MatrixXd B = tangentBasis(C);
-  Eigen::MatrixXd mt = B.transpose() * ms * B;
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es0(mt);
-  double lam_min = es0.eigenvalues()(0); // 升序
-  PhaseFixResult out;
-  out.lam_min_before = lam_min;
-  // std::cout<<"min_lam = "<<out.lam_min_before<<std::endl;
-  double add = 0.0;
-  Eigen::MatrixXd mt_fixed = mt;
-  if (lam_min < opt.eig_floor){
-    add = opt.eig_floor - lam_min + opt.eps_shift;
-    mt_fixed += add * Eigen::MatrixXd::Identity(C-1, C-1);
-  }
-  if (lam_min >= opt.eig_floor) {
+{
+  const int C = static_cast<int>(x.size());
+  if (C == 0) {
     PhaseFixResult out;
     out.applied = false;
-    out.lam_min_before = lam_min;
-    out.lam_min_after  = lam_min;
-    out.m_fixed = m_in_std;
-    // 这里不必求逆，沿用你外层的 invert() 即可；如需也可在此求一下
+    out.lam_min_before = 0.0;
+    out.lam_min_after  = 0.0;
+    out.m_fixed = m_in;
+    out.M_fixed = m_in;
     return out;
   }
-  // 只回写切空间修正：不会动到 1 方向的块
-  Eigen::MatrixXd m_tan = B * mt_fixed * B.transpose();
+  if (static_cast<int>(m_in.size()) != C) {
+    throw std::invalid_argument("fix_phase_hessian_one_phase: m_in row size mismatch");
+  }
+  for (int i = 0; i < C; ++i) {
+    if (static_cast<int>(m_in[i].size()) != C) {
+      throw std::invalid_argument("fix_phase_hessian_one_phase: m_in must be CxC");
+    }
+  }
 
-  // === 新：构造 K = 1 z^T + z 1^T + gamma 11^T，强制 m x = 1，且不改切空间块 ===
-  Eigen::VectorXd ones = Eigen::VectorXd::Ones(C);
+  // 1) 对称部 ms = 0.5 * (m + m^T)
+  std::vector<std::vector<double>> ms(C, std::vector<double>(C, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int j = 0; j < C; ++j) {
+      ms[i][j] = 0.5 * (m_in[i][j] + m_in[j][i]);
+    }
+  }
 
-  // 目标残差 r = 1 - m_tan * x
-  Eigen::VectorXd r = ones - m_tan * x;
+  // 2) 切空间基 B 和切空间内 Hessian mt = B^T ms B
+  auto B = tangentBasis(C);     // C × (C-1)
+  const int T = C - 1;
+
+  // tmp = ms * B   (C × T)
+  std::vector<std::vector<double>> tmp(C, std::vector<double>(T, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int k = 0; k < T; ++k) {
+      double s = 0.0;
+      for (int j = 0; j < C; ++j) {
+        s += ms[i][j] * B[j][k];
+      }
+      tmp[i][k] = s;
+    }
+  }
+
+  // mt = B^T * tmp  (T × T)
+  std::vector<std::vector<double>> mt(T, std::vector<double>(T, 0.0));
+  for (int p = 0; p < T; ++p) {
+    for (int q = 0; q < T; ++q) {
+      double s = 0.0;
+      for (int i = 0; i < C; ++i) {
+        s += B[i][p] * tmp[i][q];
+      }
+      mt[p][q] = s;
+    }
+  }
+
+  // 3) 计算切空间最小特征值
+  std::vector<double> mt_flat(T * T);
+  for (int i = 0; i < T; ++i) {
+    for (int j = 0; j < T; ++j) {
+      mt_flat[i * T + j] = mt[i][j];
+    }
+  }
+  std::vector<double> evals;
+  std::vector<double> evecs;
+  solver.eigenDecomposeSymmetric(T, mt_flat, evals, evecs);
+
+  PhaseFixResult out;
+  if (evals.empty()) {
+    out.applied = false;
+    out.lam_min_before = 0.0;
+    out.lam_min_after  = 0.0;
+    out.m_fixed = m_in;
+    return out;
+  }
+
+  const double lam_min = evals[0]; // 升序
+  out.lam_min_before = lam_min;
+
+  double add = 0.0;
+  std::vector<std::vector<double>> mt_fixed = mt;
+  if (lam_min < opt.eig_floor) {
+    add = opt.eig_floor - lam_min + opt.eps_shift;
+    for (int i = 0; i < T; ++i) {
+      mt_fixed[i][i] += add;
+    }
+  }
+
+  if (lam_min >= opt.eig_floor) {
+    // 不需要修正
+    out.applied = false;
+    out.lam_min_after = lam_min;
+    out.m_fixed = m_in;
+    return out;
+  }
+
+  // 4) 只回写切空间修正：m_tan = B * mt_fixed * B^T
+  std::vector<std::vector<double>> tmp2(C, std::vector<double>(T, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int k = 0; k < T; ++k) {
+      double s = 0.0;
+      for (int p = 0; p < T; ++p) {
+        s += B[i][p] * mt_fixed[p][k];
+      }
+      tmp2[i][k] = s;
+    }
+  }
+
+  std::vector<std::vector<double>> m_tan(C, std::vector<double>(C, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int j = 0; j < C; ++j) {
+      double s = 0.0;
+      for (int k = 0; k < T; ++k) {
+        s += tmp2[i][k] * B[j][k];
+      }
+      m_tan[i][j] = s;
+    }
+  }
+
+  // 5) 构造 K = 1 z^T + z 1^T + gamma 11^T，强制 m x = 1
+  std::vector<double> ones(C, 1.0);
+
+  // r = 1 - m_tan * x
+  std::vector<double> mx(C, 0.0);
+  for (int i = 0; i < C; ++i) {
+    double s = 0.0;
+    for (int j = 0; j < C; ++j) {
+      s += m_tan[i][j] * x[j];
+    }
+    mx[i] = s;
+  }
+
+  std::vector<double> r(C);
+  for (int i = 0; i < C; ++i) {
+    r[i] = 1.0 - mx[i];
+  }
 
   // 分解 r = r_perp + rho * 1
-  double rho = r.sum() / static_cast<double>(C);
-  Eigen::VectorXd r_perp = r - rho * ones;
+  double rho = 0.0;
+  for (int i = 0; i < C; ++i) rho += r[i];
+  rho /= static_cast<double>(C);
+
+  std::vector<double> r_perp(C);
+  for (int i = 0; i < C; ++i) {
+    r_perp[i] = r[i] - rho * ones[i]; // ones[i]==1
+  }
 
   // 设 z = r_perp, gamma = rho - r_perp^T x
-  Eigen::VectorXd z = r_perp;
-  double gamma = rho - r_perp.dot(x);
+  std::vector<double> z = r_perp;
+  double rperp_dot_x = 0.0;
+  for (int i = 0; i < C; ++i) {
+    rperp_dot_x += r_perp[i] * x[i];
+  }
+  double gamma = rho - rperp_dot_x;
 
-  // 组装对称修正 K
-  Eigen::MatrixXd K = ones * z.transpose() + z * ones.transpose()
-                    + gamma * (ones * ones.transpose());
-
-  // 最终修正后的 m
-  Eigen::MatrixXd m_fix = m_tan + K;
+  // K = 1 z^T + z 1^T + gamma 11^T
+  std::vector<std::vector<double>> m_fix(C, std::vector<double>(C, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int j = 0; j < C; ++j) {
+      double Kij = ones[i] * z[j] + z[i] * ones[j] + gamma * ones[i] * ones[j];
+      m_fix[i][j] = m_tan[i][j] + Kij;
+    }
+  }
 
   // （可选）数值余量：轻微对称化，避免舍入
-  m_fix = 0.5 * (m_fix + m_fix.transpose());
-
-  // 现在检查切空间最小特征值（不会变，因为 B^T K B = 0）
-  Eigen::MatrixXd mt_chk = B.transpose() * m_fix * B;
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_chk(mt_chk);
-  out.lam_min_after = es_chk.eigenvalues()(0);
-
-  // 求逆
-  Eigen::LDLT<Eigen::MatrixXd> ldlt(m_fix);
-  if (ldlt.info()!=Eigen::Success) {
-    m_fix += opt.eps_shift * Eigen::MatrixXd::Identity(C,C);
-    ldlt.compute(m_fix);
+  for (int i = 0; i < C; ++i) {
+    for (int j = i + 1; j < C; ++j) {
+      double avg = 0.5 * (m_fix[i][j] + m_fix[j][i]);
+      m_fix[i][j] = m_fix[j][i] = avg;
+    }
   }
-  Eigen::MatrixXd M_fix = ldlt.solve(Eigen::MatrixXd::Identity(C,C));
+
+  // 6) 检查切空间最小特征值（B^T m_fix B）
+  std::vector<std::vector<double>> tmp3(C, std::vector<double>(T, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int k = 0; k < T; ++k) {
+      double s = 0.0;
+      for (int j = 0; j < C; ++j) {
+        s += m_fix[i][j] * B[j][k];
+      }
+      tmp3[i][k] = s;
+    }
+  }
+
+  std::vector<std::vector<double>> mt_chk(T, std::vector<double>(T, 0.0));
+  for (int p = 0; p < T; ++p) {
+    for (int q = 0; q < T; ++q) {
+      double s = 0.0;
+      for (int i = 0; i < C; ++i) {
+        s += B[i][p] * tmp3[i][q];
+      }
+      mt_chk[p][q] = s;
+    }
+  }
+
+  std::vector<double> mt_chk_flat(T * T);
+  for (int i = 0; i < T; ++i) {
+    for (int j = 0; j < T; ++j) {
+      mt_chk_flat[i * T + j] = mt_chk[i][j];
+    }
+  }
+  std::vector<double> evals_chk;
+  std::vector<double> evecs_chk;
+  solver.eigenDecomposeSymmetric(T, mt_chk_flat, evals_chk, evecs_chk);
+  if (!evals_chk.empty()) {
+    out.lam_min_after = evals_chk[0];
+  } else {
+    out.lam_min_after = 0.0;
+  }
+
+  // 7) 求逆：M_fix = m_fix^{-1}
+  std::vector<double> m_fix_flat(C * C);
+  for (int i = 0; i < C; ++i) {
+    for (int j = 0; j < C; ++j) {
+      m_fix_flat[i * C + j] = m_fix[i][j];
+    }
+  }
+  std::vector<double> M_flat = solver.invertSPD(C, m_fix_flat);
+  std::vector<std::vector<double>> M_fix(C, std::vector<double>(C, 0.0));
+  for (int i = 0; i < C; ++i) {
+    for (int j = 0; j < C; ++j) {
+      M_fix[i][j] = M_flat[i * C + j];
+    }
+  }
 
   // 不变量核验：M*1 是否等于 x（理论上应当精确成立）
-  Eigen::VectorXd diff = M_fix * ones - x;
-  // 允许很小数值误差
-  if (diff.norm() > 1e-9) {
+  std::vector<double> M1(C, 0.0);
+  for (int i = 0; i < C; ++i) {
+    double s = 0.0;
+    for (int j = 0; j < C; ++j) {
+      s += M_fix[i][j] * ones[j];
+    }
+    M1[i] = s;
+  }
+
+  std::vector<double> diff(C, 0.0);
+  double diff2 = 0.0;
+  for (int i = 0; i < C; ++i) {
+    diff[i] = M1[i] - x[i];
+    diff2 += diff[i] * diff[i];
+  }
+
+  if (std::sqrt(diff2) > 1e-9) {
+    const double invC = 1.0 / static_cast<double>(C);
     // 极小对称化补偿（理论上用不到）
-    M_fix -= 0.5 * (diff * ones.transpose() + ones * diff.transpose()) / static_cast<double>(C);
+    for (int i = 0; i < C; ++i) {
+      for (int j = 0; j < C; ++j) {
+        M_fix[i][j] -= 0.5 * (diff[i] + diff[j]) * invC;
+      }
+    }
   }
 
   // 输出
   out.applied = (add > 0.0);     // 只有切空间真做了移位才算“应用”
-  out.m_fixed = toStd(m_fix);
-  out.M_fixed = toStd(M_fix);
+  out.m_fixed = std::move(m_fix);
+  out.M_fixed = std::move(M_fix);
   return out;
 }
 
@@ -221,7 +445,7 @@ InitResult RandFlash::initializeTwoPhase(
   const double eps = 1e-14;
   const double Fmin = eps, Fmax = Ftot * (1.0 - margin);
 
-  // 案例 A：只给了气相组成 y
+  // CASE A：只给了气相组成 y
   if (!vaporGuess.empty() && liquidGuess.empty()) {
     if (vaporGuess.size() != C) throw std::invalid_argument("vaporGuess size mismatch");
     out.y0 = normalized(vaporGuess);
@@ -258,7 +482,7 @@ InitResult RandFlash::initializeTwoPhase(
     return out;
   }
 
-  // 案例 B：只给了液相组成 x
+  // CASE B：只给了液相组成 x
   if (vaporGuess.empty() && !liquidGuess.empty()) {
     if (liquidGuess.size() != C) throw std::invalid_argument("liquidGuess size mismatch");
     out.x0 = normalized(liquidGuess);
@@ -294,7 +518,7 @@ InitResult RandFlash::initializeTwoPhase(
     return out;
   }
 
-  // 案例 C：同时给了 y 与 x —— 用最小二乘估计“共识” beta，再恢复 nV/nL
+  // CASE C：同时给了 y 与 x —— 用最小二乘估计“共识” beta，再恢复 nV/nL
   if (!vaporGuess.empty() && !liquidGuess.empty()) {
     if (vaporGuess.size() != C || liquidGuess.size() != C)
       throw std::invalid_argument("Initial composition size mismatch");
@@ -330,7 +554,7 @@ InitResult RandFlash::initializeTwoPhase(
     return out;
   }
 
-  // 案例 D：既没有给 y 也没有给 x —— 用 Thermopack 的 Wilson K 做两相初始化
+  // CASE D：既没有给 y 也没有给 x —— 用 Thermopack 的 Wilson K 做两相初始化
   {
     // 1) feed mole fraction z 已经在函数开头算过：z[i] = feed[i] / Ftot;
 
@@ -693,28 +917,17 @@ std::vector<double> RandFlash::solveGlobalLinearSystem(
   double* residual_out) const
 {
   const int N = static_cast<int>(rhs.size());
-  assert(static_cast<int>(Acoef.size()) == N*N);
+  assert(static_cast<int>(Acoef.size()) == N * N);
 
-  // Map 1D Acoef 到 Eigen 行主序矩阵
-  Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
-      A_mat(Acoef.data(), N, N);
-  Eigen::Map<const Eigen::VectorXd> b_vec(rhs.data(), N);
+  double res_norm = 0.0;
+  std::vector<double> sol = linearSolver_.solveDense(N, Acoef, rhs, &res_norm);
 
-  // 与原代码保持一致：使用 SVD 最小范数解
-  Eigen::JacobiSVD<Eigen::MatrixXd> svd(
-      A_mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
-  Eigen::VectorXd x_vec = svd.solve(b_vec);
-
-  // 残差检测（保持原有阈值与日志）
-  const double res_norm = (A_mat * x_vec - b_vec).norm();
-  if (residual_out) *residual_out = res_norm;
+  if (residual_out) {
+    *residual_out = res_norm;
+  }
   if (res_norm > 1e-6) {
     std::cerr << "[RandFlash] Warning: high residual = " << res_norm << "\n";
   }
-
-  // 写回 std::vector
-  std::vector<double> sol;
-  sol.assign(x_vec.data(), x_vec.data() + N);
   return sol;
 }
 
@@ -979,14 +1192,14 @@ randflash::FlashResult RandFlash::solveTwoPhase(
       }
 
       PhaseFixOptions pfx;
-      auto fixV = fix_phase_hessian_one_phase(xV, mV, pfx);
+      auto fixV = fix_phase_hessian_one_phase(linearSolver_,xV, mV, pfx);
       if (fixV.applied) {
         mV = fixV.m_fixed;
         std::cout << "[PhaseFix] Vapor: lam_min "
                   << fixV.lam_min_before << " -> "
                   << fixV.lam_min_after << "\n";
       }
-      auto fixL = fix_phase_hessian_one_phase(xL, mL, pfx);
+      auto fixL = fix_phase_hessian_one_phase(linearSolver_,xL, mL, pfx);
       if (fixL.applied) {
         mL = fixL.m_fixed;
         std::cout << "[PhaseFix] Liquid: lam_min "
@@ -995,8 +1208,8 @@ randflash::FlashResult RandFlash::solveTwoPhase(
       }
 
       // 2.4 反演 m_j -> M_j
-      MV = invert(mV);
-      ML = invert(mL);
+      MV = invert(mV,linearSolver_);
+      ML = invert(mL,linearSolver_);
       std::cout << "局部矩阵反演完成, 迭代 " << (iter+1) << std::endl;
       // for (size_t i = 0; i < C; ++i) {
       //   for (size_t k = 0; k < C; ++k) {
