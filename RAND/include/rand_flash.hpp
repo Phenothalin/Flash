@@ -28,9 +28,20 @@ struct PhaseFixResult {
 };
 
 struct PhaseContext {
-  thermo::PhaseState state;              // T, P, n, phaseFlag
-  std::vector<std::vector<double>> m;    // 局部 m 矩阵
-  std::vector<double> mu;               // 化学势
+  thermo::PhaseState state;                 // 这一相的 T, P, n, phaseFlag
+
+  std::vector<double> x;                    // 相内归一化组成 x_i = n_i / sum(n)
+  std::vector<std::vector<double>> m;       // 局部 Hessian m
+  std::vector<std::vector<double>> M;       // m 的逆 (SPD 修正后再求)
+  std::vector<double> mu;                   // 化学势 μ_i
+};
+
+struct SystemContext {
+  double temperature = 0.0;
+  double pressure    = 0.0;
+  std::vector<double> feedMoles;                    // size C
+  std::vector<std::vector<double>> elementMatrix;   // size E × C
+  std::vector<PhaseContext> phases;    // 当前所有相的局部信息：目前只用 size == 2 (0=vap, 1=liq)
 };
 
 struct FlashResult {
@@ -45,17 +56,6 @@ struct FlashResult {
   double convergenceError = 0.0;
 };
 
-struct MultiFlashResult {
-  bool success = false;
-  double pressure = 0.0;
-  double temperature = 0.0;
-  std::vector<double> feedComposition;                 // size C, absolute moles
-  std::vector<std::vector<double>> n_phase;            // F x C, moles in each phase
-  std::vector<double> beta;                            // size F, phase totals
-  int iterations = 0;                                  // inner Newton iterations (last)
-  double mu_infinity_norm = 0.0;                       // max phase-to-phase μ spread
-  double elem_residual_inf = 0.0;                      // ||A*(sum n - feed)||_inf
-};
 
 class RandFlash {
   public:
@@ -64,7 +64,7 @@ class RandFlash {
 
     FlashResult solveTwoPhase(
         const thermo::PhaseState& state,
-        const std::vector<std::vector<double>>& elementMatrix,
+        const std::vector<std::vector<double>>& elementMatri,
         const std::vector<double>& initialVaporComposition = {},
         const std::vector<double>& initialLiquidComposition = {},
         int maxIterations = 50,
@@ -77,17 +77,18 @@ class RandFlash {
         bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
       };
 
-      // RandFlash(const RandFlash&) = delete;
-      // RandFlash& operator=(const RandFlash&) = delete;
-    
-      // // 如有需要，允许移动（方便以后放在容器里）
-      // RandFlash(RandFlash&&) = default;
-      // RandFlash& operator=(RandFlash&&) = default;
-
   private:
   // std::shared_ptr<thermo::IThermoBackend> thermo_;
   thermo::IThermoBackend& thermo_;
   ls::LinearSolverInterface& linearSolver_;
+
+  // === 新增：基于 PhaseContext 的局部更新工具 ===
+  // 根据 phaseCtx.state.moleNumbers 更新该相的 x / mu / m，并把修正后 n 写回 state
+  void updatePhaseChemistry(PhaseContext& phaseCtx);
+
+  // 对 phaseCtx.m 做 SPD 修正，并填充 phaseCtx.M（必要时调用线性求解器求逆）
+  void fixPhaseHessian(PhaseContext& phaseCtx,
+                       const PhaseFixOptions& opt);
 
   void assembleLocalJacobian(const thermo::PhaseState& state,
     std::vector<std::vector<double>>& m,
@@ -106,27 +107,13 @@ class RandFlash {
     std::vector<double>& Acoef,
     std::vector<double>& rhs);
   
+    
   InitResult initializeTwoPhase(
-    const std::vector<double>& feed,                       // 进料各组分摩尔数
-    const double Temprarue,
-    const double Pressure,                  
+    const SystemContext& sys,                
     const std::vector<double>& vaporGuess,                 // 允许空
     const std::vector<double>& liquidGuess,                // 允许空
     double margin = 1e-3) const;                           // 远离边界的小裕度
 
-  double armijoLineSearch(
-    const std::vector<double>& nV,
-    const std::vector<double>& nL,
-    const std::vector<double>& dnV,
-    const std::vector<double>& dnL,
-    double temperature, double pressure,
-    const std::vector<std::vector<double>>& A,
-    const std::vector<double>& feed,
-    double eta,           // e.g. 1e-2
-    double alpha0,        // 1.0
-    double c,             // 1e-4
-    double shrink
-  );
   double lineSearch(
     const std::vector<double>& nV,
     const std::vector<double>& nL,
@@ -170,6 +157,7 @@ class RandFlash {
   ConvergenceInfo checkConvergence(
     int iternumber,
     double tol,
+    double temperature,
     const std::vector<double>& muV,
     const std::vector<double>& muL,
     const std::vector<std::vector<double>>& elementMatrix,

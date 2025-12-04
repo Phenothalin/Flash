@@ -7,127 +7,6 @@
 using namespace randflash;
 using namespace ls;
 
-// 保证逐分量守恒 + 组分单纯形精确成立 (暂无使用)
-inline void enforce_component_balance_and_simplex(
-  std::vector<double>& nV, std::vector<double>& nL,
-  const std::vector<double>& nFeed, // 全流程不变的进料逐分量摩尔数
-  double* betaV_out = nullptr, double* betaL_out = nullptr,
-  std::vector<double>* xV_out = nullptr, std::vector<double>* xL_out = nullptr)
-{
-  const int nc = static_cast<int>(nV.size());
-  assert(nc == static_cast<int>(nL.size()) &&
-         nc == static_cast<int>(nFeed.size()));
-
-  // 1) 逐分量裁剪，避免数值微负/微超
-  for (int i = 0; i < nc; ++i) {
-    double nv = nV[i];
-    const double nf = nFeed[i];
-
-    // 把 nV 限制在 [0, nF]
-    if (nv < 0.0) nv = 0.0;
-    if (nv > nf)  nv = nf;
-    nV[i] = nv;
-
-    // 由守恒强制 nL
-    nL[i] = nf - nV[i];
-
-    // 再保一次非负（理论上不会触发，防卫式）
-    if (nL[i] < 0.0) { nV[i] += nL[i]; nL[i] = 0.0; }
-    if (nV[i] < 0.0) { nL[i] += nV[i]; nV[i] = 0.0; }
-  }
-
-  // 2) 精确计算 beta，并构造单纯形上的 x
-  double betaV = 0.0;
-  double betaL = 0.0;
-  for (int i = 0; i < nc; ++i) {
-    betaV += nV[i];
-    betaL += nL[i];
-  }
-
-  if (betaV_out) *betaV_out = betaV;
-  if (betaL_out) *betaL_out = betaL;
-
-  if (xV_out) {
-    xV_out->assign(nc, 0.0);
-    if (betaV > 0.0) {
-      const double invBetaV = 1.0 / betaV;
-      for (int i = 0; i < nc; ++i) {
-        (*xV_out)[i] = nV[i] * invBetaV;
-      }
-    }
-  }
-  if (xL_out) {
-    xL_out->assign(nc, 0.0);
-    if (betaL > 0.0) {
-      const double invBetaL = 1.0 / betaL;
-      for (int i = 0; i < nc; ++i) {
-        (*xL_out)[i] = nL[i] * invBetaL;
-      }
-    }
-  }
-}
-
-// === 构造切空间正交基 B: 1^T y = 0 ===
-// 用 (e_i - e_C) 做初基，再 Gram–Schmidt 正交化
-static std::vector<std::vector<double>> tangentBasis(int C){
-  std::vector<std::vector<double>> B(C, std::vector<double>(C-1, 0.0));
-
-  // 初始基：第 k 列为 e_k - e_C
-  for (int k = 0; k < C-1; ++k){ // 列 k
-    B[k][k]   =  1.0;
-    B[C-1][k] = -1.0;
-  }
-
-  // Gram-Schmidt 正交化
-  for (int j = 0; j < C-1; ++j){
-    // 去除在之前列上的分量
-    for (int i = 0; i < j; ++i){
-      double proj = 0.0;
-      for (int r = 0; r < C; ++r) {
-        proj += B[r][i] * B[r][j];
-      }
-      for (int r = 0; r < C; ++r) {
-        B[r][j] -= proj * B[r][i];
-      }
-    }
-
-    // 归一化
-    double nrm2 = 0.0;
-    for (int r = 0; r < C; ++r) {
-      nrm2 += B[r][j] * B[r][j];
-    }
-    double nrm = std::sqrt(nrm2);
-    if (nrm < 1e-14) { // 退化保护：随机扰动再正交
-      for (int r = 0; r < C; ++r) {
-        B[r][j] = static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX);
-      }
-      for (int i = 0; i < j; ++i){
-        double proj = 0.0;
-        for (int r = 0; r < C; ++r) {
-          proj += B[r][i] * B[r][j];
-        }
-        for (int r = 0; r < C; ++r) {
-          B[r][j] -= proj * B[r][i];
-        }
-      }
-      nrm2 = 0.0;
-      for (int r = 0; r < C; ++r) {
-        nrm2 += B[r][j] * B[r][j];
-      }
-      nrm = std::sqrt(nrm2);
-      if (nrm < 1e-14) {
-        throw std::runtime_error("tangentBasis: failed to build non-degenerate basis");
-      }
-    }
-    const double inv_nrm = 1.0 / nrm;
-    for (int r = 0; r < C; ++r) {
-      B[r][j] *= inv_nrm;
-    }
-  }
-
-  // 可选：检查 1^T B = 0，这里略
-  return B;
-}
 
 // === 在切空间做 SPD 修正，并保持 m x = 1 ===
 static PhaseFixResult fix_phase_hessian_one_phase(
@@ -164,7 +43,7 @@ static PhaseFixResult fix_phase_hessian_one_phase(
   }
 
   // 2) 切空间基 B 和切空间内 Hessian mt = B^T ms B
-  auto B = tangentBasis(C);     // C × (C-1)
+  auto B = ls::tangentBasis(C);     // C × (C-1)
   const int T = C - 1;
 
   // tmp = ms * B   (C × T)
@@ -404,16 +283,14 @@ RandFlash::RandFlash(thermo::IThermoBackend& thermo,
 
 // ---- in rand_flash.cpp ----
 InitResult RandFlash::initializeTwoPhase(
-  const std::vector<double>& feed,
-  const double Temperature,
-  const double Pressure,
+  const SystemContext& sys,
   const std::vector<double>& vaporGuess,
   const std::vector<double>& liquidGuess,
   double margin) const
 {
-  const size_t C = feed.size();
+  const size_t C = sys.feedMoles.size();
   auto sum = [](const std::vector<double>& v){ return std::accumulate(v.begin(), v.end(), 0.0); };
-  const double Ftot = sum(feed);
+  const double Ftot = sum(sys.feedMoles);
   if (Ftot <= 0.0) throw std::invalid_argument("Feed total must be positive");
 
   // 工具：归一化/基本检查
@@ -437,7 +314,7 @@ InitResult RandFlash::initializeTwoPhase(
 
   // 进料分率 z
   std::vector<double> z(C);
-  for (size_t i=0;i<C;++i) z[i] = feed[i] / Ftot;
+  for (size_t i=0;i<C;++i) z[i] = sys.feedMoles[i] / Ftot;
 
   // 结果
   InitResult out;
@@ -454,7 +331,7 @@ InitResult RandFlash::initializeTwoPhase(
     double ub = Fmax; // 也要避免 beta→Ftot
     for (size_t i=0;i<C;++i) {
       if (out.y0[i] > eps) {
-        ub = std::min(ub, feed[i] / out.y0[i]);
+        ub = std::min(ub, sys.feedMoles[i] / out.y0[i]);
       }
     }
     ub = std::max(ub, Fmin);             // 上界至少要大于 0
@@ -465,7 +342,7 @@ InitResult RandFlash::initializeTwoPhase(
     if (Ltot <= Ftot*margin) beta = Ftot*(1.0 - margin);
     std::vector<double> x(C);
     for (size_t i=0;i<C;++i) {
-      x[i] = (feed[i] - beta*out.y0[i]) / (Ftot - beta);
+      x[i] = (sys.feedMoles[i] - beta*out.y0[i]) / (Ftot - beta);
       if (x[i] < 0.0) x[i] = 0.0; //（理论上不会触发，容错）
     }
     // 轻度重归一，消除舍入误差
@@ -492,7 +369,7 @@ InitResult RandFlash::initializeTwoPhase(
     double lb = Fmin;
     for (size_t i=0;i<C;++i) {
       if (out.x0[i] > eps) {
-        lb = std::max(lb, Ftot - feed[i]/out.x0[i]);
+        lb = std::max(lb, Ftot - sys.feedMoles[i]/out.x0[i]);
       }
     }
     lb = std::max(lb, Fmin);
@@ -502,7 +379,7 @@ InitResult RandFlash::initializeTwoPhase(
     // 由 x 和 beta 反解 y
     std::vector<double> y(C);
     for (size_t i=0;i<C;++i) {
-      y[i] = (feed[i] - (Ftot - beta)*out.x0[i]) / beta;
+      y[i] = (sys.feedMoles[i] - (Ftot - beta)*out.x0[i]) / beta;
       if (y[i] < 0.0) y[i] = 0.0; //（理论上不会触发，容错）
     }
     y = normalized(y);
@@ -538,8 +415,8 @@ InitResult RandFlash::initializeTwoPhase(
     // 上界来自 A 案例，下界来自 B 案例
     double ub = Fmax, lb = Fmin;
     for (size_t i=0;i<C;++i) {
-      if (out.y0[i] > eps) ub = std::min(ub, feed[i] / out.y0[i]);
-      if (out.x0[i] > eps) lb = std::max(lb, Ftot - feed[i]/out.x0[i]);
+      if (out.y0[i] > eps) ub = std::min(ub, sys.feedMoles[i] / out.y0[i]);
+      if (out.x0[i] > eps) lb = std::max(lb, Ftot - sys.feedMoles[i]/out.x0[i]);
     }
     beta = std::min(std::max(beta, lb*(1.0 + margin)), ub*(1.0 - margin));
 
@@ -556,13 +433,13 @@ InitResult RandFlash::initializeTwoPhase(
 
   // CASE D：既没有给 y 也没有给 x —— 用 Thermopack 的 Wilson K 做两相初始化
   {
-    // 1) feed mole fraction z 已经在函数开头算过：z[i] = feed[i] / Ftot;
+    // 1) feed mole fraction z 已经在函数开头算过：z[i] = sys.feedMoles[i] / Ftot;
 
     // 2) Thermopack 计算 Wilson K 值
     std::vector<double> K(C, 0.0);
     {
-      double T = Temperature; // 或改成传进来的 T
-      double P = Pressure; // 或改成传进来的 P
+      double T = sys.temperature; // 或改成传进来的 T
+      double P = sys.pressure; // 或改成传进来的 P
       thermo_.wilsonK(T, P, K);
     }
 
@@ -639,50 +516,109 @@ InitResult RandFlash::initializeTwoPhase(
 }
 
 // 1) 局部 Jacobian 构造：对应论文式 (4.11)-(4.14)
-//    m_j[i][k] = β_j * ( (1/RT) * ∂μ_i/∂n_k + 1 )
-//    mu_j 已经由 chemicalPotentials 给出
+void RandFlash::updatePhaseChemistry(PhaseContext& phaseCtx)
+{
+  // 1) 复制一份状态以便安全裁剪 n_i（避免零 / 负数）
+  thermo::PhaseState st = phaseCtx.state;
+  for (double& ni : st.moleNumbers) {
+    if (ni <= 1e-10) ni = 1e-10;
+  }
+
+  const size_t C = st.moleNumbers.size();
+  const double RT = R_CONST * st.Temperature;
+
+  // 2) 计算 μ_i 与 dμ_i/dn_k
+  phaseCtx.mu = thermo_.chemicalPotentials(st);
+  auto dmun   = thermo_.dmu_dn(st);  // C×C
+
+  // 3) 计算总摩尔数 β_j，并更新 x
+  const double beta = std::accumulate(st.moleNumbers.begin(),
+                                      st.moleNumbers.end(), 0.0);
+
+  phaseCtx.x.assign(C, 0.0);
+  if (beta > 0.0) {
+    const double invBeta = 1.0 / beta;
+    for (size_t i = 0; i < C; ++i) {
+      phaseCtx.x[i] = st.moleNumbers[i] * invBeta;
+    }
+  } else {
+    const double uniform = 1.0 / static_cast<double>(C);
+    std::fill(phaseCtx.x.begin(), phaseCtx.x.end(), uniform);
+  }
+
+  // 4) 组装 m[i][k] = β_j * ( (1/RT) * dμ_i/dn_k + 1 )
+  phaseCtx.m.assign(C, std::vector<double>(C, 0.0));
+  for (size_t i = 0; i < C; ++i) {
+    for (size_t k = 0; k < C; ++k) {
+      phaseCtx.m[i][k] = beta * (dmun[i][k] / RT ) + 1.0;
+    }
+  }
+
+  // 5) 把可能被裁剪过的 n 写回 phaseCtx.state
+  phaseCtx.state.moleNumbers = st.moleNumbers;
+}
+
+void RandFlash::fixPhaseHessian(PhaseContext& phaseCtx,
+                                const PhaseFixOptions& opt)
+{
+  const size_t C = phaseCtx.state.moleNumbers.size();
+  if (C == 0) {
+    phaseCtx.m.clear();
+    phaseCtx.M.clear();
+    phaseCtx.x.clear();
+    phaseCtx.mu.clear();
+    return;
+  }
+
+  // 正常情况下，updatePhaseChemistry 已经算好了 x；
+  // 万一没算，兜底成均匀分布
+  if (phaseCtx.x.size() != C) {
+    phaseCtx.x.assign(C, 1.0 / static_cast<double>(C));
+  }
+
+  // 1) 相内 Hessian SPD 修正
+  PhaseFixResult fixRes =
+      fix_phase_hessian_one_phase(linearSolver_, phaseCtx.x, phaseCtx.m, opt);
+
+  if (fixRes.applied) {
+    std::cout << "[PhaseFix] lam_min "
+              << fixRes.lam_min_before << " -> "
+              << fixRes.lam_min_after << std::endl;
+  }
+
+  // 2) 用返回的 m_fixed（如果有），否则就用当前 m
+  if (!fixRes.m_fixed.empty()) {
+    phaseCtx.m = fixRes.m_fixed;
+  }
+  // 理论上 fixRes.m_fixed 应该总是非空；加个兜底也无妨
+  if (phaseCtx.m.empty()) {
+    phaseCtx.m.assign(C, std::vector<double>(C, 0.0));
+  }
+
+  // 3) 每次迭代都基于最新的 m 重新计算 M
+  if (!fixRes.M_fixed.empty()) {
+    // 如果 PhaseFix 内部已经顺便求了逆，就直接用它
+    phaseCtx.M = fixRes.M_fixed;
+  } else {
+    // 否则就在这里求一次 SPD 逆
+    phaseCtx.M = ls::invert(phaseCtx.m, linearSolver_);
+  }
+}
+
 void randflash::RandFlash::assembleLocalJacobian(
   const thermo::PhaseState& state,
   std::vector<std::vector<double>>& m,
   std::vector<double>& mu)
 {
-  // 1. 复制一份状态，以便安全地改 n_i
-  thermo::PhaseState st = state;
-  for (double &ni : st.moleNumbers) {
-      if (ni <= 1e-10) ni = 1e-10;
-  }
+  PhaseContext ctx;
+  ctx.state = state;
 
-  // 2. 计算 μ 和 ∂μ/∂n
-  mu = thermo_.chemicalPotentials(st);
-  auto dmun = thermo_.dmu_dn(st);
-  // for (size_t i = 0; i < moleNumbers.size(); ++i) {
-  //   for (size_t k = 0; k < moleNumbers.size(); ++k) {
-  //       std::cout << dmun[i][k] << "  ";  // 同一行打印
-  //   }
-  //   std::cout << std::endl;  // 换行
-  // }    
-  // 3. 构造 m_j 矩阵：m_j[i][k] = β_j*(dμ/dn/RT +1),此处 β_j = totalMoles
-  double totalMoles = std::accumulate(st.moleNumbers.begin(), st.moleNumbers.end(), 0.0);
-  double RT = R_CONST * st.Temperature;
-  size_t C = st.moleNumbers.size();
-  m.assign(C, std::vector<double>(C,0.0));
-  for (size_t i=0;i<C;++i){
-    for (size_t k=0;k<C;++k){
-      double coeff = dmun[i][k]/RT ;      // (4.11) 中括号内
-      m[i][k] = totalMoles * coeff + 1.0;           // 乘以 β_j
-    }
-  }
-  // for(size_t i = 0; i < C; ++i) {
-  //   for(size_t k = 0; k < C; ++k) {
-  //     std::cout << "m[" << i << "][" << k << "] = "
-  //               << m[i][k] << std::endl;
-  //   }
-  // }
-  
-  // 轻微对角抖动（相对尺度）
-  // double dmean = 0.0; for (size_t i=0;i<C;++i) dmean += std::abs(m[i][i]); dmean = std::max(dmean/C, 1.0);
-  // for (size_t i=0;i<C;++i) m[i][i] += 1e-10 * dmean;
+  updatePhaseChemistry(ctx);
+
+  m  = ctx.m;
+  mu = ctx.mu;
 }
+
 
 // 2) 全局系统装配：对应论文式 (4.21)-(4.25)
 //    构造 (E+2)x(E+2) 系数矩阵 Acoef 和 RHS rhs
@@ -1047,6 +983,7 @@ double RandFlash::applyUpdate(
 RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   int iternumber,
   double tol,
+  double temperature,
   const std::vector<double>& muV,
   const std::vector<double>& muL,
   const std::vector<std::vector<double>>& elementMatrix,
@@ -1055,14 +992,18 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   const std::vector<double>& feedComposition) const
 {
   RandFlash::ConvergenceInfo info{};
-  int C = nV.size();
-  int E = elementMatrix.size();
-  // max |muV - muL|
+  int C = static_cast<int>(nV.size());
+  int E = static_cast<int>(elementMatrix.size());
+
+  // 1) 无量纲化的 max |(muV - muL)/RT|
+  const double RT = R_CONST * temperature;   // 和 assembleLocalJacobian 里保持一致
   double max_mu_diff = 0.0;
   for (size_t i = 0; i < muV.size(); ++i) {
-    max_mu_diff = std::max(max_mu_diff, std::fabs(muV[i] - muL[i]));
+    double dimless_diff = std::fabs(muV[i] - muL[i]) / RT;
+    max_mu_diff = std::max(max_mu_diff, dimless_diff);
   }
-  // 元素守恒 L∞ 范数
+
+  // 2) 元素守恒 L∞ 范数（维持原实现）
   auto elementResidualInf = [&](const std::vector<std::vector<double>>& A,
                                 const std::vector<double>& nV_,
                                 const std::vector<double>& nL_,
@@ -1080,30 +1021,15 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   };
   double elem_err = elementResidualInf(elementMatrix, nV, nL, feedComposition);
 
-  // 与原日志一致的输出
-  std::cout << "Iter "<< iternumber <<" | max_mu_diff: " << max_mu_diff << std::endl;
+  std::cout << "Iter "<< iternumber <<" | max_mu_diff (dimless): " << max_mu_diff << std::endl;
   std::cout << "Iter "<< iternumber <<" | element error: " << elem_err << "\n" << std::endl;
-  
-  // // 假设 elementMatrix 是 E×C，feed 是原始进料摩尔数
-  // std::vector<double> nTot(C);
-  // for (size_t i = 0; i < C; ++i) nTot[i] = nV[i] + nL[i];
 
-  // for (size_t e = 0; e < E; ++e) {
-  //     double lhs = 0.0;
-  //     double rhs = 0.0;
-  //     for (size_t i = 0; i < C; ++i) {
-  //         lhs += elementMatrix[e][i] * nTot[i];
-  //         rhs += elementMatrix[e][i] * feedComposition[i];
-  //     }
-  //     double err = lhs - rhs;
-  //     std::cout << "element " << e << " residual = " << err << "\n";
-  // }
-
-  info.max_mu_diff = max_mu_diff;
+  info.max_mu_diff = max_mu_diff;   // 现在这个就是无量纲差
   info.elem_error  = elem_err;
   info.converged   = (max_mu_diff < tol && elem_err < 1e-6);
   return info;
 }
+
 
 randflash::FlashResult RandFlash::solveTwoPhase(
   const thermo::PhaseState& state,
@@ -1116,196 +1042,149 @@ randflash::FlashResult RandFlash::solveTwoPhase(
   const size_t C = state.moleNumbers.size();
   const size_t E = elementMatrix.size();
 
-  // 计算总进料摩尔数（目前只用于 debug）
-  double totalFeed = std::accumulate(state.moleNumbers.begin(),
-                                     state.moleNumbers.end(), 0.0);
+  // === 0) 构造系统级上下文 ===
+  SystemContext sys;
+  sys.temperature    = state.Temperature;
+  sys.pressure       = state.Pressure;
+  sys.feedMoles      = state.moleNumbers;
+  sys.elementMatrix  = elementMatrix;
+  sys.phases.resize(2);  // 0: vapor, 1: liquid
 
-  // 1) 初始猜 nV, nL（优先使用提供的初始组成，否则使用平分策略）
+  // === 1) 初始气液摩尔数 nV, nL ===
   std::vector<double> nV(C), nL(C);
   auto init = initializeTwoPhase(
-      state.moleNumbers,
-      state.Temperature,
-      state.Pressure,
+      sys,
       initialVaporComposition,
       initialLiquidComposition,
-      /*margin=*/1e-3);
-  nV = std::move(init.nV);
-  nL = std::move(init.nL);
+      /*margin=*/1e-8);
+
+  nV = init.nV;
+  nL = init.nL;
 
   std::cout << "Calculated betaV: " << init.betaV
-            << "\n初始气相摩尔分率 betaV/(betaV+betaL) = "
-            << (init.betaV / (init.betaV + init.betaL))
-            << std::endl;
+            << ", betaL: " << init.betaL << "\n"
+            << "初始气相摩尔分率 betaV/(betaV+betaL) = "
+            << (init.betaV / (init.betaV + init.betaL)) << std::endl;
 
-  // 2) 构造两相的 PhaseState（phaseFlag 用 backend 提供的 vapor/liquid 标志）
-  thermo::PhaseState vap{state.Temperature, state.Pressure, nV, thermo_.vaporPhaseFlag()};
-  thermo::PhaseState liq{state.Temperature, state.Pressure, nL, thermo_.liquidPhaseFlag()};
-  // std::cout<<"构造两相PhaseState的 phaseFlag  "<<thermo_.vaporPhaseFlag()<<"  "<<thermo_.liquidPhaseFlag()<<std::endl;
-  
+  // === 2) 用 PhaseContext 封装两相状态 ===
+  auto& vapCtx = sys.phases[0];
+  auto& liqCtx = sys.phases[1];
+
+  vapCtx.state = thermo::PhaseState{
+      state.Temperature, state.Pressure, nV, thermo_.vaporPhaseFlag()};
+  liqCtx.state = thermo::PhaseState{
+      state.Temperature, state.Pressure, nL, thermo_.liquidPhaseFlag()};
+
   FlashResult result;
   result.pressure        = state.Pressure;
   result.temperature     = state.Temperature;
   result.feedComposition = state.moleNumbers;
-  result.success         = false;  // 默认失败，收敛时再置 true
+  result.success         = false;
 
-  // 分配临时存储（在循环外分配，循环内重复复用）
-  std::vector<std::vector<double>> mV, mL;     // 局部 m_j
-  std::vector<double>              muV, muL;   // 局部 μ
-  std::vector<std::vector<double>> MV, ML;     // m_j 反演后的 M_j
-  std::vector<double> Acoef, rhs, sol;         // 全局系统 A * x = rhs
-  std::vector<double> Lambda;                  // 元素平衡拉格朗日乘子
-  std::vector<double> deltaBeta(2);            // Δβ_v, Δβ_l
-  std::vector<double> dnV(C), dnL(C);          // Δn^V, Δn^L
+  // 预分配迭代所需容器
+  std::vector<double> Acoef, rhs, sol;
+  std::vector<double> Lambda;              // Δλ
+  std::vector<double> deltaBeta(2);        // Δβ_v, Δβ_l
+  std::vector<double> dnV(C), dnL(C);      // Δn^V, Δn^L
 
   std::cout << "进入迭代循环, maxIter = " << maxIter << std::endl;
 
   try {
     for (int iter = 0; iter < maxIter; ++iter) {
-      // --- 2.1 更新 PhaseState 中的 n ---
-      vap.moleNumbers = nV;
-      liq.moleNumbers = nL;
+      std::cout << "\n=== RandFlash iter " << (iter + 1) << " ===\n";
 
-      std::cout << "开始组装局部矩阵, C = "
-                << state.moleNumbers.size()
-                << " (迭代 " << (iter+1) << ")\n";
+      // --- 2.1 更新 PhaseContext 中的 n ---
+      vapCtx.state.moleNumbers = nV;
+      liqCtx.state.moleNumbers = nL;
 
-      // --- 2.2 组装两相的局部 Hessian m_j 和 μ ---
-      assembleLocalJacobian(vap, mV, muV);
-      assembleLocalJacobian(liq, mL, muL);
-      // std::cout<<"气相组成化学势为："<<std::endl;
-      // for (size_t i = 0; i < C; ++i) {
-      //       std::cout << muV[i] <<"  " ;
-      // }
-      // std::cout<<"\n"<<"液相组成化学势为："<<std::endl;;
-      // for (size_t i = 0; i < C; ++i) {
-      //   std::cout << muL[i] << "  ";
-      // }
-      std::cout << "局部矩阵组装完成, 迭代 " << (iter+1) << std::endl;
+      // --- 2.2 计算局部 μ / m（并更新 x） ---
+      updatePhaseChemistry(vapCtx);
+      updatePhaseChemistry(liqCtx);
 
-      // === 2.3 相内 Hessian 修正 ===
-      double betaV = std::accumulate(nV.begin(), nV.end(), 0.0);
-      double betaL = std::accumulate(nL.begin(), nL.end(), 0.0);
-      std::vector<double> xV(C), xL(C);
-      for (size_t i = 0; i < C; ++i) {
-        xV[i] = (betaV > 0.0) ? nV[i] / betaV : 1.0 / double(C);
-        xL[i] = (betaL > 0.0) ? nL[i] / betaL : 1.0 / double(C);
-      }
+      std::cout << "局部 μ / m 计算完成\n";
 
+      // --- 2.3 相内 Hessian 修正 + 求逆，填充 M ---
       PhaseFixOptions pfx;
-      auto fixV = fix_phase_hessian_one_phase(linearSolver_,xV, mV, pfx);
-      if (fixV.applied) {
-        mV = fixV.m_fixed;
-        std::cout << "[PhaseFix] Vapor: lam_min "
-                  << fixV.lam_min_before << " -> "
-                  << fixV.lam_min_after << "\n";
-      }
-      auto fixL = fix_phase_hessian_one_phase(linearSolver_,xL, mL, pfx);
-      if (fixL.applied) {
-        mL = fixL.m_fixed;
-        std::cout << "[PhaseFix] Liquid: lam_min "
-                  << fixL.lam_min_before << " -> "
-                  << fixL.lam_min_after << "\n";
-      }
+      fixPhaseHessian(vapCtx, pfx);
+      fixPhaseHessian(liqCtx, pfx);
 
-      // 2.4 反演 m_j -> M_j
-      MV = invert(mV,linearSolver_);
-      ML = invert(mL,linearSolver_);
-      std::cout << "局部矩阵反演完成, 迭代 " << (iter+1) << std::endl;
-      // for (size_t i = 0; i < C; ++i) {
-      //   for (size_t k = 0; k < C; ++k) {
-      //       std::cout << MV[i][k] << "  ";  // 同一行打印
-      //   }
-      //   std::cout << std::endl;  // 换行
-      // } 
-      
-      // 3) 全局系统装配
+      std::cout << "相内 Hessian 修正完成\n";
+
+      // --- 3) 组装全局线性系统 A x = rhs ---
+      Acoef.clear();
+      rhs.clear();
+
       assembleGlobalSystem(
-        state.Temperature,
-        MV, ML, muV, muL,
+        sys.temperature,
+        vapCtx.M, liqCtx.M,
+        vapCtx.mu, liqCtx.mu,
         nV, nL,
-        elementMatrix,
-        state.moleNumbers,   // 进料 n^F
+        sys.elementMatrix,
+        sys.feedMoles,
         Acoef,
-        rhs
-      );
-      std::cout<<"rhs: ";
-      for(size_t i =0 ; i < rhs.size() ; ++i){
-        std::cout<<rhs[i]<<"  ";
-      }
-      std::cout<<std::endl;
-      std::cout << "全局系统装配完成, 迭代 " << (iter+1) << std::endl;
+        rhs);
 
-      // 4) 解线性系统
+      std::cout << "全局系统装配完成\n";
+
+      // --- 4) 解线性系统，得到 Δλ, Δβ ---
       double lin_resid = 0.0;
       sol = solveGlobalLinearSystem(Acoef, rhs, &lin_resid);
-      std::cout << "线性系统求解完成, 迭代 " << (iter+1) << std::endl;
 
-      // 拆解解向量：[Δλ_1…Δλ_E, Δβ_v, Δβ_l]
-      Lambda.assign(sol.begin(), sol.begin() + E);
-      deltaBeta[0] = sol[E];
-      deltaBeta[1] = sol[E+1];
-
-      std::cout << "  Lambda: ";
-      for (double dl : Lambda) std::cout << dl << " ";
-      std::cout << "\n  deltaBeta_v=" << deltaBeta[0]
-                << "  deltaBeta_l=" << deltaBeta[1] << std::endl;
-
-      // 5) 回代恢复 Δn
-      {
-        double betaV_dbg = std::accumulate(nV.begin(), nV.end(), 0.0);
-        double betaL_dbg = std::accumulate(nL.begin(), nL.end(), 0.0);
-        std::cout << "  更新前 : ";
-        std::cout << "\n  nV: ";
-        for (double v : nV) std::cout << v << " ";
-        std::cout << "\n  nL: ";
-        for (double v : nL) std::cout << v << " ";
-        std::cout << "\n  betaV: " << betaV_dbg
-                  << ", betaL: " << betaL_dbg;
-        std::cout << "\n  xV: ";
-        for (double v : nV) std::cout << v / betaV_dbg << " ";
-        std::cout << "\n  xL: ";
-        for (double v : nL) std::cout << v / betaL_dbg << " ";
-        std::cout << std::endl;
+      if (sol.size() != E + 2) {
+        throw std::runtime_error("solveGlobalLinearSystem returned wrong size");
       }
 
+      Lambda.assign(sol.begin(), sol.begin() + E);
+      deltaBeta[0] = sol[E + 0];  // vapor
+      deltaBeta[1] = sol[E + 1];  // liquid
+
+      std::cout << "线性系统求解完成, residual = " << lin_resid << "\n";
+
+      // --- 5) 回代恢复 Δn^V, Δn^L ---
       backSubstituteDeltas(
-        state.Temperature,
-        elementMatrix,
-        MV, ML,
-        muV, muL,
+        sys.temperature,
+        sys.elementMatrix,
+        vapCtx.M, liqCtx.M,
+        vapCtx.mu, liqCtx.mu,
         nV, nL,
         Lambda,
         deltaBeta,
-        dnV, dnL
-      );
+        dnV, dnL);
 
-      // 6) 线搜索 + 更新
+      std::cout << "回代 Δn 完成\n";
+
+      // --- 6) 线搜索 + 更新 nV, nL ---
       double alpha = applyUpdate(
-        state.Temperature,
-        muV, muL,
+        sys.temperature,
+        vapCtx.mu, liqCtx.mu,
         dnV, dnL,
-        nV, nL
-      );
+        nV, nL);
 
-      // 7) 收敛判断
+      std::cout << "线搜索 alpha = " << alpha << "\n";
+
+      // --- 7) 收敛判断 ---
       auto conv = checkConvergence(
         iter + 1,
         tol,
-        muV, muL,
-        elementMatrix,
+        sys.temperature,
+        vapCtx.mu, liqCtx.mu,
+        sys.elementMatrix,
         nV, nL,
-        state.moleNumbers
-      );
+        sys.feedMoles);
 
       if (conv.converged) {
         double betaV_fin = std::accumulate(nV.begin(), nV.end(), 0.0);
         double betaL_fin = std::accumulate(nL.begin(), nL.end(), 0.0);
+
         result.success           = true;
         result.vaporFraction     = betaV_fin / (betaV_fin + betaL_fin);
         result.vaporComposition  = nV;
         result.liquidComposition = nL;
         result.iterations        = iter + 1;
         result.convergenceError  = conv.max_mu_diff;
+
+        std::cout << "RandFlash 收敛, iter = " << result.iterations
+                  << ", vaporFraction = " << result.vaporFraction << "\n";
         return result;
       }
     }
@@ -1317,6 +1196,7 @@ randflash::FlashResult RandFlash::solveTwoPhase(
   }
 
   // 若 maxIter 内未收敛
+  std::cout << "RandFlash 未在 maxIter 内收敛\n";
   result.success = false;
   return result;
 }
