@@ -45,6 +45,20 @@ target_link_libraries(2phase_rand_test
       randflash
 )
 
+add_executable(3phase_rand_test
+    tests/3phase_rand_test.cpp
+)
+
+target_include_directories(3phase_rand_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(3phase_rand_test
+    PRIVATE
+      randflash
+)
 # add_executable(rand_flash_test
 #     tests/rand_flash_test.cpp
 # )

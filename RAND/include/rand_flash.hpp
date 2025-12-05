@@ -1,3 +1,5 @@
+// RAND/include/rand_flash.hpp
+
 #pragma once
 #include "thermo_backend.hpp"
 #include "linear_solver.hpp"
@@ -6,23 +8,24 @@
 
 namespace randflash {
 
+// 通用初始化结果（不再限于两相）
 struct InitResult {
-  std::vector<double> nV, nL;  // 各组分相内摩尔数
-  double betaV = 0.0, betaL = 0.0;
-  std::vector<double> y0, x0;  // 归一化后的初始 y/x（便于日志）
+  std::vector<std::vector<double>> n_phases; // [F][C]
+  std::vector<double> beta;                  // [F]
+  std::vector<std::vector<double>> compositions; // [F][C] (x, y...)
 };
 
 struct FlashInput {
   double temperature = 0.0;
   double pressure    = 0.0;
-  std::vector<double> feedMoles;  // size C, 总进料逐组分摩尔数
+  std::vector<double> feedMoles;  // size C
 };
 
 struct PhaseFixOptions {
-  double eig_floor     = 1e-10;   // 切空间最小特征值下限 δ
-  double eps_shift     = 1e-12;   // 额外小移位 ε
-  double inv_tol       = 1e-12;   // 求逆时的数值容差
-  int    max_repair_it = 3;       // 失败时再微调次数
+  double eig_floor     = 1e-10;
+  double eps_shift     = 1e-12;
+  double inv_tol       = 1e-12;
+  int    max_repair_it = 3;
 };
 
 struct PhaseFixResult {
@@ -34,22 +37,22 @@ struct PhaseFixResult {
 };
 
 struct PhaseContext {
-  thermo::PhaseState state;                 // 这一相的 T, P, n, phaseFlag
-
-  std::vector<double> x;                    // 相内归一化组成 x_i = n_i / sum(n)
-  std::vector<std::vector<double>> m;       // 局部 Hessian m
-  std::vector<std::vector<double>> M;       // m 的逆 (SPD 修正后再求)
-  std::vector<double> mu;                   // 化学势 μ_i
+  thermo::PhaseState state;
+  std::vector<double> x;                    
+  std::vector<std::vector<double>> m;       
+  std::vector<std::vector<double>> M;       
+  std::vector<double> mu;                   
 };
 
 struct SystemContext {
   double temperature = 0.0;
   double pressure    = 0.0;
-  std::vector<double> feedMoles;                    // size C
-  std::vector<std::vector<double>> elementMatrix;   // size E × C
-  std::vector<PhaseContext> phases;    // 当前所有相的局部信息：目前只用 size == 2 (0=vap, 1=liq)
+  std::vector<double> feedMoles;                    
+  std::vector<std::vector<double>> elementMatrix;   
+  std::vector<PhaseContext> phases;    // size F
 };
 
+// 保持 FlashResult 兼容旧的 solveTwoPhase 接口
 struct FlashResult {
   bool success = false;
   double pressure = 0.0;
@@ -66,22 +69,23 @@ struct MultiFlashResult {
   bool success = false;
   double pressure = 0.0;
   double temperature = 0.0;
-  std::vector<double> feedComposition;                 // size C, absolute moles
-  std::vector<std::vector<double>> n_phase;            // F x C, moles in each phase
-  std::vector<double> beta;                            // size F, phase totals
-  int iterations = 0;                                  // inner Newton iterations (last)
-  double mu_infinity_norm = 0.0;                       // max phase-to-phase μ spread
-  double elem_residual_inf = 0.0;                      // ||A*(sum n - feed)||_inf
+  std::vector<double> feedComposition;                 
+  std::vector<std::vector<double>> n_phase;            // F x C
+  std::vector<double> beta;                            // F
+  int iterations = 0;                                  
+  double mu_infinity_norm = 0.0;                       
+  double elem_residual_inf = 0.0;                      
 };
 
 class RandFlash {
-  public:
+public:
   RandFlash(thermo::IThermoBackend& thermo,
     ls::LinearSolverInterface& linearSolver);
 
+  // 保持旧接口用于兼容性测试
   FlashResult solveTwoPhase(
     const FlashInput& input,
-    const std::vector<std::vector<double>>& elementMatri,
+    const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<double>& initialVaporComposition = {},
     const std::vector<double>& initialLiquidComposition = {},
     int maxIterations = 50,
@@ -102,22 +106,18 @@ class RandFlash {
     int maxIterations = 50,
     double tolerance = 1e-8);  
       
-  // 用于“收敛判断”的返回
   struct ConvergenceInfo {
-    double max_mu_diff;   // max |muV[i]-muL[i]|
-    double elem_error;    // || A*(nV+nL-feed) ||_inf
-    bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
+    double max_mu_diff;   
+    double elem_error;    
+    bool   converged;     
   };
 
-  private:
-  // std::shared_ptr<thermo::IThermoBackend> thermo_;
+private:
   thermo::IThermoBackend& thermo_;
   ls::LinearSolverInterface& linearSolver_;
 
-  // 根据 phaseCtx.state.moleNumbers 更新该相的 x / mu / m，并把修正后 n 写回 state
   void updatePhaseChemistry(PhaseContext& phaseCtx);
 
-  // 对 phaseCtx.m 做 SPD 修正，并填充 phaseCtx.M（必要时调用线性求解器求逆）
   void fixPhaseHessian(PhaseContext& phaseCtx,
                        const PhaseFixOptions& opt);
 
@@ -125,6 +125,7 @@ class RandFlash {
     std::vector<std::vector<double>>& m,
     std::vector<double>& mu);
 
+  // 全局系统组装（已支持多相，无需大改，只需确认内部逻辑）
   void assembleGlobalSystem(
     double temperature,
     const std::vector<std::vector<std::vector<double>>>& Ms,
@@ -135,19 +136,18 @@ class RandFlash {
     std::vector<double>& Acoef,
     std::vector<double>& rhs); 
     
+  // 两相初始化保持原样，仅供 solveTwoPhase 调用
   InitResult initializeTwoPhase(
     const SystemContext& sys,                
-    const std::vector<double>& vaporGuess,                 // 允许空
-    const std::vector<double>& liquidGuess,                // 允许空
-    double margin = 1e-3) const;                           // 远离边界的小裕度
+    const std::vector<double>& vaporGuess,                 
+    const std::vector<double>& liquidGuess,                
+    double margin = 1e-3) const;                           
 
+  // === 【修改 1】通用化 LineSearch ===
   double lineSearch(
-    const std::vector<double>& nV,
-    const std::vector<double>& nL,
-    const std::vector<double>& dnV,
-    const std::vector<double>& dnL,
-    const std::vector<double>& gV,   
-    const std::vector<double>& gL,   
+    const std::vector<std::vector<double>>& nPhases,
+    const std::vector<std::vector<double>>& dnPhases,
+    const std::vector<std::vector<double>>& gPhases,   
     double init_alpha,             
     double min_alpha,              
     double shrink
@@ -164,31 +164,35 @@ class RandFlash {
     const std::vector<std::vector<std::vector<double>>>& Ms,
     const std::vector<std::vector<double>>& mus,
     const std::vector<std::vector<double>>& nPhases,
-    const std::vector<double>& Lambda,         // 长度 E
-    const std::vector<double>& deltaBeta,      // 长度 F: {Δβ_1,…,Δβ_F}
-    std::vector<std::vector<double>>& dnPhases // [F][C]
+    const std::vector<double>& Lambda,         
+    const std::vector<double>& deltaBeta,      
+    std::vector<std::vector<double>>& dnPhases 
   ) const;
 
+  // === 【修改 2】通用化 applyUpdate ===
+  // 返回 alpha
   double applyUpdate(
     double temperature,
-    const std::vector<double>& muV,
-    const std::vector<double>& muL,
-    const std::vector<double>& dnV,
-    const std::vector<double>& dnL,
-    std::vector<double>& nV_inout,
-    std::vector<double>& nL_inout) ;
+    const std::vector<std::vector<double>>& mus,
+    const std::vector<std::vector<double>>& dnPhases,
+    std::vector<std::vector<double>>& nPhases_inout);
   
+  // === 【修改 3】通用化 checkConvergence ===
   ConvergenceInfo checkConvergence(
     int iternumber,
     double tol,
     double temperature,
-    const std::vector<double>& muV,
-    const std::vector<double>& muL,
+    const std::vector<std::vector<double>>& mus,
     const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<double>& nV,
-    const std::vector<double>& nL,
+    const std::vector<std::vector<double>>& nPhases,
     const std::vector<double>& feedComposition) const;
 
-  };
+  // === 【新增】通用求解内核 ===
+  // 所有的 Newton 迭代逻辑移到这里，solveTwoPhase 和 solveMultiPhaseCore 只是它的包装
+  MultiFlashResult solveGeneral(
+    SystemContext& sys,
+    int maxIterations,
+    double tolerance);
+};
 
 } // namespace randflash
