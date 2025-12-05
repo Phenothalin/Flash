@@ -624,143 +624,105 @@ void randflash::RandFlash::assembleLocalJacobian(
 //    构造 (E+2)x(E+2) 系数矩阵 Acoef 和 RHS rhs
 void RandFlash::assembleGlobalSystem(
   double temperature,
-  const std::vector<std::vector<double>>& MV,
-  const std::vector<std::vector<double>>& ML,
-  const std::vector<double>& muV,
-  const std::vector<double>& muL,
-  const std::vector<double>& moleNumbersV,
-  const std::vector<double>& moleNumbersL,
+  const std::vector<std::vector<std::vector<double>>>& Ms,
+  const std::vector<std::vector<double>>& mus,
+  const std::vector<std::vector<double>>& nPhases,
   const std::vector<std::vector<double>>& elementMatrix,
   const std::vector<double>& feedComposition, 
   std::vector<double>& Acoef,
   std::vector<double>& rhs)
 {
-  int E = (int)elementMatrix.size();
-  int C = (int)elementMatrix[0].size();
-  int F = 2;
-  int N = E + F;
-  Acoef.assign(N*N, 0.0);
+  const int E = static_cast<int>(elementMatrix.size());
+  const int C = static_cast<int>(elementMatrix[0].size());
+  const int F = static_cast<int>(Ms.size());
+
+  const int N = E + F;
+  Acoef.assign(N * N, 0.0);
   rhs.assign(N, 0.0);
 
-  double RT = R_CONST * temperature;
-  double betaV = std::accumulate(moleNumbersV.begin(), moleNumbersV.end(), 0.0);
-  double betaL = std::accumulate(moleNumbersL.begin(), moleNumbersL.end(), 0.0);
-  std::vector<double> xV(C), xL(C);
-  for(int i=0;i<C;++i){
-    xV[i] = moleNumbersV[i] / betaV;
-    xL[i] = moleNumbersL[i] / betaL;
+  const double RT = R_CONST * temperature;
+
+  // 1) 每个相的 β_j 和 x_j
+  std::vector<double> beta(F, 0.0);
+  std::vector<std::vector<double>> x(F, std::vector<double>(C, 0.0));
+  for (int j = 0; j < F; ++j) {
+    const auto& n = nPhases[j];
+    beta[j] = std::accumulate(n.begin(), n.end(), 0.0);
+    for (int i = 0; i < C; ++i) {
+      x[j][i] = (beta[j] > 0.0) ? (n[i] / beta[j]) : 0.0;
+    }
   }
 
-  // 1) 左上块 A (sum_j β_j M_j) A^T
-  for(int ell = 0; ell < E; ++ell){
-    for(int k = 0; k < E; ++k){
+  // 2) 左上块：A (∑_j β_j M_j) A^T
+  for (int ell = 0; ell < E; ++ell) {
+    for (int k = 0; k < E; ++k) {
       double sumjk = 0.0;
-      // sum over phases j
-      for(int j=0;j<F;++j){
-        const auto& Mj = (j==0 ? MV : ML);
-        double β = (j==0 ? betaV : betaL);
-        // sum over components i,p
-        for(int i=0;i<C;++i){
-          if (elementMatrix[ell][i] == 0.0) continue;
-          for(int p=0;p<C;++p){
-            if (elementMatrix[k][p] == 0.0) continue;
-            sumjk += elementMatrix[ell][i]
-                  * (β * Mj[i][p])
-                  * elementMatrix[k][p];
+      for (int j = 0; j < F; ++j) {
+        const auto& Mj = Ms[j];
+        const double betaj = beta[j];
+        for (int i = 0; i < C; ++i) {
+          const double A_li = elementMatrix[ell][i];
+          if (A_li == 0.0) continue;
+          for (int p = 0; p < C; ++p) {
+            const double A_kp = elementMatrix[k][p];
+            if (A_kp == 0.0) continue;
+            sumjk += A_li * (betaj * Mj[i][p]) * A_kp;
           }
         }
       }
-      Acoef[ell*N + k] = sumjk;//全局矩阵中第 ell行k列的元素
+      Acoef[ell * N + k] = sumjk;
     }
-  } 
-
-  // 2) 左下/右上块 A X
-  // X is diag of ones per phase: A * (vector of ones) = sum over columns of A
-  for(int ell = 0; ell < E; ++ell){
-    // vapor 相 (第 E+0 列)
-    double AX_v = 0.0;
-    for(int i=0;i<C;++i){
-      // A_{ell,i} * xV_i
-      AX_v += elementMatrix[ell][i] * xV[i];
-    }
-    Acoef[ell*N + (E+0)] = AX_v;
-    Acoef[(E+0)*N + ell] = AX_v;  // 对称
-
-    // liquid 相 (第 E+1 列)
-    double AX_l = 0.0;
-    for(int i=0;i<C;++i){
-      AX_l += elementMatrix[ell][i] * xL[i];
-    }
-    Acoef[ell*N + (E+1)] = AX_l;
-    Acoef[(E+1)*N + ell] = AX_l;
   }
-  std::cout << "betaV=" << betaV << ", betaL=" << betaL << std::endl;
-  std::cout << "xV: "; for (auto x : xV) std::cout << x << " "; std::cout << std::endl;
-  // 3) 下右 F×F 块全 0（按文献式 (4.25)）
 
-  // 4) 构造 RHS u1 (元素守恒常数项)
+  // 3) 左下 / 右上块：A X（每个相一列）
+  for (int ell = 0; ell < E; ++ell) {
+    for (int j = 0; j < F; ++j) {
+      double AX = 0.0;
+      for (int i = 0; i < C; ++i) {
+        AX += elementMatrix[ell][i] * x[j][i];
+      }
+      const int col = E + j;
+      Acoef[ell * N + col] = AX;
+      Acoef[col * N + ell] = AX;  // 对称
+    }
+  }
+
+  // ===== RHS 部分 =====
+
+  // 4) u1: 元素守恒相关项 (文中对应式 (4.22) 那个 μ 部分)
   for (int ell = 0; ell < E; ++ell) {
     double val = 0.0;
-    // ——— 蒸气相贡献 ———
-    for (int i = 0; i < C; ++i) {
-      double A_li = elementMatrix[ell][i];
-      if (A_li == 0.0) continue;
-      for (int p = 0; p < C; ++p) {
-        val += A_li
-             * (betaV * MV[i][p] * (muV[p] / RT));
-      }
-    }
-    // ——— 液相贡献 ———
-    for (int i = 0; i < C; ++i) {
-      double A_li = elementMatrix[ell][i];
-      if (A_li == 0.0) continue;
-      for (int p = 0; p < C; ++p) {
-        val += A_li
-             * (betaL * ML[i][p] * (muL[p] / RT));
+    for (int j = 0; j < F; ++j) {
+      const auto& Mj  = Ms[j];
+      const auto& muj = mus[j];
+      const double betaj = beta[j];
+      for (int i = 0; i < C; ++i) {
+        const double A_li = elementMatrix[ell][i];
+        if (A_li == 0.0) continue;
+        for (int p = 0; p < C; ++p) {
+          val += A_li * (betaj * Mj[i][p] * (muj[p] / RT));
+        }
       }
     }
     rhs[ell] = val;
   }
 
-
-  // 5) 构造 RHS u2 (还原自由能)
-  // red_j = sum_ell ( A * x_j )_ell * (μ_j/RT)
-  // but simpler: x_i = n_i/β, ∑_i x_i μ_i/RT, same as before
-  double redV=0.0, redL=0.0;
-  for(int i=0;i<C;++i){
-    redV += (moleNumbersV[i]/betaV) * (muV[i]/RT);
-    redL += (moleNumbersL[i]/betaL) * (muL[i]/RT);
+  // 5) u2: 每个相的“还原自由能”部分
+  for (int j = 0; j < F; ++j) {
+    const auto& n   = nPhases[j];
+    const auto& muj = mus[j];
+    const double betaj = beta[j];
+    double red = 0.0;
+    if (betaj > 0.0) {
+      for (int i = 0; i < C; ++i) {
+        red += (n[i] / betaj) * (muj[i] / RT);
+      }
+    }
+    rhs[E + j] = red;
   }
-  rhs[E+0] = redV;
-  rhs[E+1] = redL;
 
-
-  // // 预计算 n_tot 和元素残差 r_elem = A*(F - (nV+nL))
-  // std::vector<double> n_tot(C);
-  // for (size_t i = 0; i < C; ++i) n_tot[i] = moleNumbersV[i] + moleNumbersL[i];
-
-  // // u1: for each element ell
-  // for (size_t ell = 0; ell < E; ++ell) {
-  //     double r_elem = 0.0;    // A*(F - n)_ell
-  //     double mu_term = 0.0;   // sum_i A_{ell,i} * [ betaV*(muV_i/RT) + betaL*(muL_i/RT) ]
-  //     for (size_t i = 0; i < C; ++i) {
-  //         const double A_li = elementMatrix[ell][i];
-  //         r_elem += A_li * (feedComposition[i] - n_tot[i]);
-  //         mu_term += A_li * (betaV * (muV[i]/RT) + betaL * (muL[i]/RT));
-  //     }
-  //     rhs[ell] = r_elem + mu_term;
-  // }
-
-  // // u2: each phase j uses  beta_j * (x_j · mu_j/RT)
-  // double redV = 0.0, redL = 0.0;
-  // for (size_t i = 0; i < C; ++i) {
-  //     redV += xV[i] * (muV[i]/RT);
-  //     redL += xL[i] * (muL[i]/RT);
-  // }
-  // rhs[E + 0] = betaV * redV;
-  // rhs[E + 1] = betaL * redL;
+  // feedComposition 当前仍未显式用到（和你现有实现一致），先保留接口不删
 }
-
 
 // 3) 线搜索：对应论文式 (4.32)
 double RandFlash::lineSearch(
@@ -871,62 +833,67 @@ std::vector<double> RandFlash::solveGlobalLinearSystem(
 void RandFlash::backSubstituteDeltas(
   double temperature,
   const std::vector<std::vector<double>>& elementMatrix,
-  const std::vector<std::vector<double>>& MV,
-  const std::vector<std::vector<double>>& ML,
-  const std::vector<double>& muV,
-  const std::vector<double>& muL,
-  const std::vector<double>& nV,
-  const std::vector<double>& nL,
+  const std::vector<std::vector<std::vector<double>>>& Ms,
+  const std::vector<std::vector<double>>& mus,
+  const std::vector<std::vector<double>>& nPhases,
   const std::vector<double>& Lambda,
   const std::vector<double>& deltaBeta,
-  std::vector<double>& dnV,
-  std::vector<double>& dnL) const
+  std::vector<std::vector<double>>& dnPhases) const
 {
-  const size_t C = nV.size();
+  const size_t F = Ms.size();
+  const size_t C = nPhases.empty() ? 0 : nPhases[0].size();
   const size_t E = elementMatrix.size();
-  (void)E; // 仅用于一致性
 
-  dnV.assign(C, 0.0);
-  dnL.assign(C, 0.0);
+  dnPhases.assign(F, std::vector<double>(C, 0.0));
 
   const double RT = R_CONST * temperature;
-  const double betaV = std::accumulate(nV.begin(), nV.end(), 0.0);
-  const double betaL = std::accumulate(nL.begin(), nL.end(), 0.0);
 
-  // A^T * Lambda
+  // 1) A^T * Lambda, 维度 C
   std::vector<double> lambdaComponent(C, 0.0);
   for (size_t p = 0; p < C; ++p) {
     for (size_t ell = 0; ell < E; ++ell) {
       lambdaComponent[p] += elementMatrix[ell][p] * Lambda[ell];
     }
   }
-  // diff_j = A^T λ − μ_j/RT
-  std::vector<double> diffV(C), diffL(C);
-  for (size_t p = 0; p < C; ++p) {
-    diffV[p] = lambdaComponent[p] - muV[p] / RT;
-    diffL[p] = lambdaComponent[p] - muL[p] / RT;
-  }
 
-  // 回代：Δn_i,j = x_i,j Δβ_j + β_j * M_j * diff_j
-  for (size_t i = 0; i < C; ++i) {
-    const double xVi = nV[i] / betaV;
-    const double xLi = nL[i] / betaL;
-    double combV = 0.0, combL = 0.0;
+  // 2) 针对每个相 j 计算 diff_j = A^T λ − μ_j/RT，并回代 Δn^{(j)}
+  for (size_t j = 0; j < F; ++j) {
+    const auto& Mj  = Ms[j];
+    const auto& muj = mus[j];
+    const auto& n   = nPhases[j];
+
+    double betaj = std::accumulate(n.begin(), n.end(), 0.0);
+    if (betaj <= 0.0) continue;
+
+    std::vector<double> diff(C, 0.0);
     for (size_t p = 0; p < C; ++p) {
-      combV += MV[i][p] * diffV[p];
-      combL += ML[i][p] * diffL[p];
+      diff[p] = lambdaComponent[p] - muj[p] / RT;
     }
-    dnV[i] = xVi * deltaBeta[0] + betaV * combV;
-    dnL[i] = xLi * deltaBeta[1] + betaL * combL;
+
+    auto& dn = dnPhases[j];
+
+    for (size_t i = 0; i < C; ++i) {
+      const double xij = n[i] / betaj;
+      double comb = 0.0;
+      for (size_t p = 0; p < C; ++p) {
+        comb += Mj[i][p] * diff[p];
+      }
+      dn[i] = xij * deltaBeta[j] + betaj * comb;
+    }
   }
 
-  // 与原实现保持一致的打印
-  std::cout << "\n  dnV: ";
-  for (double dv : dnV) std::cout << dv << " ";
-  std::cout << "\n  dnL: ";
-  for (double dv : dnL) std::cout << dv << " ";
-  std::cout << "\n" << std::endl;
+  // 为了不破坏你原来的调试输出风格，如果是两相就按原来的格式打印
+  if (F == 2) {
+    const auto& dnV = dnPhases[0];
+    const auto& dnL = dnPhases[1];
+    std::cout << "\n  dnV: ";
+    for (double dv : dnV) std::cout << dv << " ";
+    std::cout << "\n  dnL: ";
+    for (double dv : dnL) std::cout << dv << " ";
+    std::cout << "\n" << std::endl;
+  }
 }
+
 
 // 6) 结果更新：线搜索 + n 的更新与“更新后”打印（逻辑不变）
 double RandFlash::applyUpdate(
@@ -1032,21 +999,21 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
 
 
 randflash::FlashResult RandFlash::solveTwoPhase(
-  const thermo::PhaseState& state,
+  const FlashInput& input,
   const std::vector<std::vector<double>>& elementMatrix,
   const std::vector<double>& initialVaporComposition,   // 可空
   const std::vector<double>& initialLiquidComposition,  // 可空
   int maxIter,
   double tol)
 {
-  const size_t C = state.moleNumbers.size();
+  const size_t C = input.feedMoles.size();
   const size_t E = elementMatrix.size();
 
   // === 0) 构造系统级上下文 ===
   SystemContext sys;
-  sys.temperature    = state.Temperature;
-  sys.pressure       = state.Pressure;
-  sys.feedMoles      = state.moleNumbers;
+  sys.temperature    = input.temperature;
+  sys.pressure       = input.pressure;
+  sys.feedMoles      = input.feedMoles;
   sys.elementMatrix  = elementMatrix;
   sys.phases.resize(2);  // 0: vapor, 1: liquid
 
@@ -1071,14 +1038,14 @@ randflash::FlashResult RandFlash::solveTwoPhase(
   auto& liqCtx = sys.phases[1];
 
   vapCtx.state = thermo::PhaseState{
-      state.Temperature, state.Pressure, nV, thermo_.vaporPhaseFlag()};
+    input.temperature, input.pressure, nV, thermo_.vaporPhaseFlag()};
   liqCtx.state = thermo::PhaseState{
-      state.Temperature, state.Pressure, nL, thermo_.liquidPhaseFlag()};
+    input.temperature, input.pressure, nL, thermo_.liquidPhaseFlag()};
 
   FlashResult result;
-  result.pressure        = state.Pressure;
-  result.temperature     = state.Temperature;
-  result.feedComposition = state.moleNumbers;
+  result.pressure        = input.pressure;
+  result.temperature     = input.temperature;
+  result.feedComposition = input.feedMoles;
   result.success         = false;
 
   // 预分配迭代所需容器
@@ -1114,15 +1081,29 @@ randflash::FlashResult RandFlash::solveTwoPhase(
       Acoef.clear();
       rhs.clear();
 
+      // 3) 全局系统装配（多相通用接口，目前 F=2）
+      std::vector<std::vector<std::vector<double>>> Ms(2);
+      Ms[0] = vapCtx.M;
+      Ms[1] = liqCtx.M;
+
+      std::vector<std::vector<double>> mus(2);
+      mus[0] = vapCtx.mu;
+      mus[1] = liqCtx.mu;
+
+      std::vector<std::vector<double>> nPhases(2);
+      nPhases[0] = nV;
+      nPhases[1] = nL;
+
       assembleGlobalSystem(
-        sys.temperature,
-        vapCtx.M, liqCtx.M,
-        vapCtx.mu, liqCtx.mu,
-        nV, nL,
-        sys.elementMatrix,
-        sys.feedMoles,
+        input.temperature,
+        Ms,
+        mus,
+        nPhases,
+        elementMatrix,
+        input.feedMoles,   // 进料 n^F（暂时未在公式中使用，但保留接口）
         Acoef,
-        rhs);
+        rhs
+      );
 
       std::cout << "全局系统装配完成\n";
 
@@ -1140,16 +1121,35 @@ randflash::FlashResult RandFlash::solveTwoPhase(
 
       std::cout << "线性系统求解完成, residual = " << lin_resid << "\n";
 
-      // --- 5) 回代恢复 Δn^V, Δn^L ---
+      // 5) 回代恢复 Δn（通过多相通用接口）
+      std::vector<std::vector<std::vector<double>>> Ms_bs(2);
+      Ms_bs[0] = vapCtx.M;
+      Ms_bs[1] = liqCtx.M;
+
+      std::vector<std::vector<double>> mus_bs(2);
+      mus_bs[0] = vapCtx.mu;
+      mus_bs[1] = liqCtx.mu;
+
+      std::vector<std::vector<double>> nPhases_bs(2);
+      nPhases_bs[0] = nV;
+      nPhases_bs[1] = nL;
+
+      std::vector<std::vector<double>> dnPhases;
       backSubstituteDeltas(
-        sys.temperature,
-        sys.elementMatrix,
-        vapCtx.M, liqCtx.M,
-        vapCtx.mu, liqCtx.mu,
-        nV, nL,
+        input.temperature,
+        elementMatrix,
+        Ms_bs,
+        mus_bs,
+        nPhases_bs,
         Lambda,
         deltaBeta,
-        dnV, dnL);
+        dnPhases
+      );
+
+      // 拆回两相增量，保持后续逻辑不变
+      dnV = dnPhases[0];
+      dnL = dnPhases[1];
+
 
       std::cout << "回代 Δn 完成\n";
 

@@ -12,6 +12,12 @@ struct InitResult {
   std::vector<double> y0, x0;  // 归一化后的初始 y/x（便于日志）
 };
 
+struct FlashInput {
+  double temperature = 0.0;
+  double pressure    = 0.0;
+  std::vector<double> feedMoles;  // size C, 总进料逐组分摩尔数
+};
+
 struct PhaseFixOptions {
   double eig_floor     = 1e-10;   // 切空间最小特征值下限 δ
   double eps_shift     = 1e-12;   // 额外小移位 ε
@@ -56,33 +62,58 @@ struct FlashResult {
   double convergenceError = 0.0;
 };
 
+struct MultiFlashResult {
+  bool success = false;
+  double pressure = 0.0;
+  double temperature = 0.0;
+  std::vector<double> feedComposition;                 // size C, absolute moles
+  std::vector<std::vector<double>> n_phase;            // F x C, moles in each phase
+  std::vector<double> beta;                            // size F, phase totals
+  int iterations = 0;                                  // inner Newton iterations (last)
+  double mu_infinity_norm = 0.0;                       // max phase-to-phase μ spread
+  double elem_residual_inf = 0.0;                      // ||A*(sum n - feed)||_inf
+};
 
 class RandFlash {
   public:
-    RandFlash(thermo::IThermoBackend& thermo,
-      ls::LinearSolverInterface& linearSolver);
+  RandFlash(thermo::IThermoBackend& thermo,
+    ls::LinearSolverInterface& linearSolver);
 
-    FlashResult solveTwoPhase(
-        const thermo::PhaseState& state,
-        const std::vector<std::vector<double>>& elementMatri,
-        const std::vector<double>& initialVaporComposition = {},
-        const std::vector<double>& initialLiquidComposition = {},
-        int maxIterations = 50,
-        double tolerance = 1e-8);
-        
-      // 用于“收敛判断”的返回
-      struct ConvergenceInfo {
-        double max_mu_diff;   // max |muV[i]-muL[i]|
-        double elem_error;    // || A*(nV+nL-feed) ||_inf
-        bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
-      };
+  FlashResult solveTwoPhase(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatri,
+    const std::vector<double>& initialVaporComposition = {},
+    const std::vector<double>& initialLiquidComposition = {},
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+      
+  MultiFlashResult solveMultiPhaseCore(
+    const FlashInput& input,
+    int nPhases,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+
+  MultiFlashResult solveMultiPhase(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+    int maxIterations = 50,
+    double tolerance = 1e-8);  
+      
+  // 用于“收敛判断”的返回
+  struct ConvergenceInfo {
+    double max_mu_diff;   // max |muV[i]-muL[i]|
+    double elem_error;    // || A*(nV+nL-feed) ||_inf
+    bool   converged;     // (max_mu_diff < tol && elem_error < 1e-8)
+  };
 
   private:
   // std::shared_ptr<thermo::IThermoBackend> thermo_;
   thermo::IThermoBackend& thermo_;
   ls::LinearSolverInterface& linearSolver_;
 
-  // === 新增：基于 PhaseContext 的局部更新工具 ===
   // 根据 phaseCtx.state.moleNumbers 更新该相的 x / mu / m，并把修正后 n 写回 state
   void updatePhaseChemistry(PhaseContext& phaseCtx);
 
@@ -96,17 +127,13 @@ class RandFlash {
 
   void assembleGlobalSystem(
     double temperature,
-    const std::vector<std::vector<double>>& MV,
-    const std::vector<std::vector<double>>& ML,
-    const std::vector<double>& muV,
-    const std::vector<double>& muL,
-    const std::vector<double>& moleNumbersV,
-    const std::vector<double>& moleNumbersL,
+    const std::vector<std::vector<std::vector<double>>>& Ms,
+    const std::vector<std::vector<double>>& mus,
+    const std::vector<std::vector<double>>& nPhases,
     const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<double>& feedComposition, 
     std::vector<double>& Acoef,
-    std::vector<double>& rhs);
-  
+    std::vector<double>& rhs); 
     
   InitResult initializeTwoPhase(
     const SystemContext& sys,                
@@ -134,16 +161,13 @@ class RandFlash {
   void backSubstituteDeltas(
     double temperature,
     const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& MV,
-    const std::vector<std::vector<double>>& ML,
-    const std::vector<double>& muV,
-    const std::vector<double>& muL,
-    const std::vector<double>& nV,
-    const std::vector<double>& nL,
+    const std::vector<std::vector<std::vector<double>>>& Ms,
+    const std::vector<std::vector<double>>& mus,
+    const std::vector<std::vector<double>>& nPhases,
     const std::vector<double>& Lambda,         // 长度 E
-    const std::vector<double>& deltaBeta,      // 长度 2: {Δβ_v, Δβ_l}
-    std::vector<double>& dnV,
-    std::vector<double>& dnL) const;
+    const std::vector<double>& deltaBeta,      // 长度 F: {Δβ_1,…,Δβ_F}
+    std::vector<std::vector<double>>& dnPhases // [F][C]
+  ) const;
 
   double applyUpdate(
     double temperature,
@@ -153,7 +177,7 @@ class RandFlash {
     const std::vector<double>& dnL,
     std::vector<double>& nV_inout,
     std::vector<double>& nL_inout) ;
-    
+  
   ConvergenceInfo checkConvergence(
     int iternumber,
     double tol,
@@ -164,6 +188,7 @@ class RandFlash {
     const std::vector<double>& nV,
     const std::vector<double>& nL,
     const std::vector<double>& feedComposition) const;
+
   };
 
 } // namespace randflash
