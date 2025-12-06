@@ -2,6 +2,7 @@
 #include <vector>
 #include <memory>
 #include "thermo_adapter.hpp"
+#include <sstream>
 
 namespace thermo {
 
@@ -27,6 +28,9 @@ public:
   // 两个辅助接口：给出“气相/液相”对应的 phaseFlag（方便两相、将来多相入口用）
   virtual int vaporPhaseFlag() const = 0;
   virtual int liquidPhaseFlag() const = 0;
+
+  // 获取组分名称列表
+  virtual std::vector<std::string> getComponentNames() const = 0;
 };
 
 // ThermoPack 具体实现：把 ThermoAdapterTP 包起来，塞给 RandFlash 用
@@ -39,7 +43,9 @@ class ThermoPackBackend : public IThermoBackend {
                                const std::string& ref   = "Default",
                                bool volume_shift = false)
       : tp_(components_csv, eos, mixing, alpha, ref, volume_shift)
-    {}
+    {
+      parseComponentNames(components_csv);
+    }
 
     
     std::vector<double> chemicalPotentials(const PhaseState& st) const override
@@ -57,8 +63,28 @@ class ThermoPackBackend : public IThermoBackend {
     int vaporPhaseFlag() const override { return tp_.VAPPH(); }
     int liquidPhaseFlag() const override { return tp_.LIQPH(); }
   
+    std::vector<std::string> getComponentNames() const override {
+      return comp_names_;
+    }
   private:
     ThermoAdapterTP tp_;
+    std::vector<std::string> comp_names_;
+
+    void parseComponentNames(const std::string& csv) {
+      std::stringstream ss(csv);
+      std::string item;
+      while (std::getline(ss, item, ',')) {
+          // 去除首尾空格
+          size_t first = item.find_first_not_of(" \t");
+          if (std::string::npos == first) {
+              // 全是空格或空字符串
+              comp_names_.push_back(item); 
+          } else {
+              size_t last = item.find_last_not_of(" \t");
+              comp_names_.push_back(item.substr(first, (last - first + 1)));
+          }
+      }
+  }
 };
 
 } // namespace rf

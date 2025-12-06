@@ -89,23 +89,8 @@ int main() {
       std::cerr << "[Test] 3-Phase Flash FAILED to converge.\n";
       // 即使失败也打印一下最后结果用于调试
     } else {
-        std::cout << "[Test] 3-Phase Flash CONVERGED in " << res.iterations << " iterations.\n";
+        flash.printResult(res);
     }
-
-    // 6) 打印结果
-    std::cout << "\n=== Final Results ===\n";
-    std::cout << "Component Order: H2O, C1, nC6\n";
-    
-    // 这里的 n_phase 顺序对应传入初值的顺序：Vapor, Oil, Aqueous
-    if (res.n_phase.size() >= 3) {
-        printPhase("Phase 0 (Vap)", res.n_phase[0], sum_feed);
-        printPhase("Phase 1 (Oil)", res.n_phase[1], sum_feed);
-        printPhase("Phase 2 (Aq) ", res.n_phase[2], sum_feed);
-    } else {
-        std::cout << "Returned phase count: " << res.n_phase.size() << "\n";
-    }
-
-    return res.success ? 0 : 1;
 
   } catch (const std::exception& e) {
     std::cerr << "[Test] Exception: " << e.what() << "\n";

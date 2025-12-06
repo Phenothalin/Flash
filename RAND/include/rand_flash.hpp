@@ -112,6 +112,8 @@ public:
     bool   converged;     
   };
 
+  void printResult(const MultiFlashResult& res) const;
+
 private:
   thermo::IThermoBackend& thermo_;
   ls::LinearSolverInterface& linearSolver_;
@@ -171,7 +173,7 @@ private:
 
   // === 【修改 2】通用化 applyUpdate ===
   // 返回 alpha
-  double applyUpdate(
+  void applyUpdate(
     double temperature,
     const std::vector<std::vector<double>>& mus,
     const std::vector<std::vector<double>>& dnPhases,

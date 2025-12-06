@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
+#include <iomanip>
 
 using namespace randflash;
 using namespace ls;
@@ -699,10 +700,14 @@ double RandFlash::lineSearch(
   const size_t C = nPhases[0].size();
 
   // 检查 alpha 步长后是否保持正值
+  const double significant_mole = 1e-10;
+
   auto positive_after = [&](double a){
       for (size_t j=0; j<F; ++j) {
           for (size_t i=0; i<C; ++i) {
-              if (nPhases[j][i] + a*dnPhases[j][i] <= 0.0) return false;
+              if (nPhases[j][i] > significant_mole) {
+                if (nPhases[j][i] + a*dnPhases[j][i] <= 0.0) return false;
+              }
           }
       }
       return true;
@@ -715,7 +720,7 @@ double RandFlash::lineSearch(
   }
 
   const double dir_eps = 1e-12; 
-  // std::cout << "  descent metric = " << dir << std::endl; 
+  std::cout << "  descent metric = " << dir << std::endl; 
 
   double alpha = init_alpha;
   while (alpha > min_alpha) {
@@ -797,7 +802,7 @@ std::vector<double> RandFlash::solveGlobalLinearSystem(
   return sol;
 }
 
-// 5) 结果回代：由 {Λ, Δβ} 得到 {ΔnV, ΔnL}；保持打印 dnV/dnL
+// 5) 结果回代：由 {Λ, Δβ} 得到 Δn；
 void RandFlash::backSubstituteDeltas(
   double temperature,
   const std::vector<std::vector<double>>& elementMatrix,
@@ -850,21 +855,20 @@ void RandFlash::backSubstituteDeltas(
     }
   }
 
-  // 为了不破坏你原来的调试输出风格，如果是两相就按原来的格式打印
-  if (F == 2) {
-    const auto& dnV = dnPhases[0];
-    const auto& dnL = dnPhases[1];
-    std::cout << "\n  dnV: ";
-    for (double dv : dnV) std::cout << dv << " ";
-    std::cout << "\n  dnL: ";
-    for (double dv : dnL) std::cout << dv << " ";
-    std::cout << "\n" << std::endl;
+  // 通用打印逻辑，支持任意相数
+  std::cout << "\n  [BackSub] Deltas (dn):";
+  for (size_t j = 0; j < F; ++j) {
+      std::cout << "\n    Phase " << j << ": ";
+      for (double val : dnPhases[j]) {
+          std::cout << val << " ";
+      }
   }
+  std::cout << "\n" << std::endl;
 }
 
 
 // 6) 结果更新：线搜索 + n 的更新与“更新后”打印（逻辑不变）
-double RandFlash::applyUpdate(
+void RandFlash::applyUpdate(
   double temperature,
   const std::vector<std::vector<double>>& mus,
   const std::vector<std::vector<double>>& dnPhases,
@@ -888,10 +892,18 @@ double RandFlash::applyUpdate(
 
   std::cout << "  线搜索步长 alpha = " << alpha << std::endl;
 
-  // 更新 n
-  for(size_t j=0; j<F; ++j) {
+  // 更新 n，并执行 Clamping
+  const double min_mole_floor = 1e-20; // 物理下限
+
+  for(size_t j=0; j<nPhases_inout.size(); ++j) {
       for(size_t i=0; i<nPhases_inout[j].size(); ++i) {
-          nPhases_inout[j][i] += alpha * dnPhases[j][i];
+          double new_val = nPhases_inout[j][i] + alpha * dnPhases[j][i];
+          
+          // 如果更新后变为负数或极小值，强制拉回下限
+          if (new_val < min_mole_floor) {
+              new_val = min_mole_floor;
+          }
+          nPhases_inout[j][i] = new_val;
       }
   }
 
@@ -902,8 +914,6 @@ double RandFlash::applyUpdate(
       std::cout << b << " ";
   }
   std::cout << "\n\n";
-
-  return alpha;
 }
 
 // 7) 收敛判断：打印与返回布尔值（阈值保持原样：elem_error < 1e-8）
@@ -928,13 +938,13 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   double max_mu_diff = 0.0;
   
   if (F > 1) {
-      for (size_t j = 1; j < F; ++j) {
-          for (size_t i = 0; i < C; ++i) {
+    for (size_t j = 1; j < F; ++j) {
+        for (size_t i = 0; i < C; ++i) {
               double diff = std::fabs(mus[j][i] - mus[0][i]) / RT;
               max_mu_diff = std::max(max_mu_diff, diff);
-          }
-      }
-  }
+        }
+    }
+}
 
   // 2) 元素守恒判据
   // sum_phases (n) - feed
@@ -967,6 +977,66 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   return info;
 }
 
+void RandFlash::printResult(const MultiFlashResult& res) const {
+  // 1. 自动从 Backend 获取组分名称
+  std::vector<std::string> compNames = thermo_.getComponentNames();
+
+  std::cout << "\n============================== Flash Results ==============================\n";
+  std::cout << std::fixed << std::setprecision(2);
+  std::cout << "Temperature: " << res.temperature << " K\n";
+  std::cout << "Pressure:    " << res.pressure << " Pa\n";
+  std::cout << "Iterations:  " << res.iterations << "\n";
+  std::cout << "Status:      " << (res.success ? "CONVERGED" : "FAILED") << "\n";
+  std::cout << "Error Norm:  " << std::scientific << std::setprecision(4) << res.mu_infinity_norm << "\n";
+
+  size_t F = res.beta.size();
+  if (F == 0) {
+      std::cout << "No phases returned.\n";
+      std::cout << "===========================================================================\n";
+      return;
+  }
+
+  size_t C = 0;
+  if (!res.n_phase.empty()) C = res.n_phase[0].size();
+
+  // 校验一下组分数量是否匹配，防止越界打印
+  if (compNames.size() != C) {
+      // 如果数量不对（极少情况），补全或截断，防止 crash
+      compNames.resize(C, "Unknown");
+  }
+
+  double total_moles = 0.0;
+  for (double b : res.beta) total_moles += b;
+
+  std::cout << std::fixed << std::setprecision(5);
+
+  for (size_t j = 0; j < F; ++j) {
+      double phase_frac = (total_moles > 1e-12) ? (res.beta[j] / total_moles) : 0.0;
+      
+      std::string phaseType = "Phase";
+      if (j == 0) phaseType = "Vapor (Approx)";
+      else phaseType = "Liquid " + std::to_string(j);
+
+      std::cout << "\n---------------------------------------------------------------------------\n";
+      std::cout << " " << phaseType << " " << j << " | Phase Fraction (Beta): " << phase_frac << " | Total Moles: " << res.beta[j] << "\n";
+      std::cout << "---------------------------------------------------------------------------\n";
+      std::cout << "  Idx | " << std::left << std::setw(15) << "Component" << " | " 
+                << std::right << std::setw(12) << "Mole Frac (x)" << " | " 
+                << std::setw(12) << "Moles (n)" << "\n";
+      std::cout << "------+-----------------+--------------+--------------\n";
+
+      for (size_t i = 0; i < C; ++i) {
+          double n_i = res.n_phase[j][i];
+          double x_i = (res.beta[j] > 1e-20) ? (n_i / res.beta[j]) : 0.0;
+          
+          std::cout << "  " << std::setw(3) << i << " | " 
+                    << std::left << std::setw(15) << compNames[i] << " | " 
+                    << std::right << std::setw(12) << x_i << " | " 
+                    << std::scientific << std::setprecision(4) << n_i << std::fixed << std::setprecision(5) << "\n";
+      }
+  }
+  std::cout << "===========================================================================\n\n";
+}
 
 // randflash::FlashResult RandFlash::solveTwoPhase(
 //   const FlashInput& input,

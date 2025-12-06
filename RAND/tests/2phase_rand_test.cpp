@@ -24,7 +24,7 @@ int main() {
     double T = 295.0;      // K
     double P = 2.0e6;      // Pa
     std::vector<double> feed = {
-      0.1, 0.015, 0.55, 0.14, 0.12,
+      1, 0.015, 0.55, 0.14, 0.12,
       0.05, 0.045, 0.03, 0.025, 0.012, 0.01
     };
     double sum_feed = 0.0;
@@ -60,19 +60,7 @@ int main() {
       return 1;
     }
 
-    std::cout << "[Test] solveTwoPhase converged in "
-              << res.iterations << " iterations.\n";
-    std::cout << "  T = " << res.temperature
-              << " K, P = " << res.pressure << " Pa\n";
-    // std::cout << "  vapor fraction = " << res.vaporFraction << "\n";
-
-    // std::cout << "  vapor fraction: ";
-    // for (double nv : res.vaporComposition) std::cout << nv/sum_feed << " ";
-    // std::cout << "\n";
-
-    // std::cout << "  liquid fraction: ";
-    // for (double nl : res.liquidComposition) std::cout << nl/sum_feed << " ";
-    // std::cout << "\n";
+    flash.printResult(res);
 
     return 0;
   } catch (const std::exception& e) {
