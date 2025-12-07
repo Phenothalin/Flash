@@ -26,23 +26,40 @@ target_link_libraries(randflash
     PUBLIC
       thermo
       Eigen3::Eigen
+      GTest::gtest
 )
 
 # ===================== RAND 测试 =====================
 
-add_executable(2phase_rand_test
-    tests/2phase_rand_test.cpp
+add_executable(2phase_complex_test
+    tests/2phase_complex_test.cpp
 )
 
-target_include_directories(2phase_rand_test
+target_include_directories(2phase_complex_test
     PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include
       ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
 )
 
-target_link_libraries(2phase_rand_test
+target_link_libraries(2phase_complex_test
     PRIVATE
       randflash
+)
+
+add_executable(2phase_tests
+    tests/2phase_tests.cpp
+)
+
+target_include_directories(2phase_tests
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(2phase_tests
+    PRIVATE
+      randflash
+      GTest::gtest
 )
 
 add_executable(3phase_rand_test

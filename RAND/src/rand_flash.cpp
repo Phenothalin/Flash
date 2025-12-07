@@ -97,6 +97,7 @@ static PhaseFixResult fix_phase_hessian_one_phase(
 
   const double lam_min = evals[0]; // 升序
   out.lam_min_before = lam_min;
+  // std::cout<<"lam_min: "<<lam_min;
 
   double add = 0.0;
   std::vector<std::vector<double>> mt_fixed = mt;
@@ -620,28 +621,7 @@ void RandFlash::assembleGlobalSystem(
 
   // ===== RHS 部分 =====
 
-  // === 【关键修改】计算当前所有相的元素总量，用于计算残差 ===
-  std::vector<double> current_element_moles(E, 0.0);
-  for (int ell = 0; ell < E; ++ell) {
-      for (int j = 0; j < F; ++j) {
-          for (int i = 0; i < C; ++i) {
-              current_element_moles[ell] += elementMatrix[ell][i] * nPhases[j][i];
-          }
-      }
-  }
-  
-  // 计算进料的元素总量 (feedElements = A * z)
-  std::vector<double> feed_element_moles(E, 0.0);
-  for (int ell = 0; ell < E; ++ell) {
-      for (int i = 0; i < C; ++i) {
-          feed_element_moles[ell] += elementMatrix[ell][i] * feedComposition[i];
-      }
-  }
-  // ========================================================
-
   // 4) u1: 
-  //    项1 (Potential): A * sum(beta * M * (mu/RT))
-  //    项2 (Residual):  (FeedElements - CurrentElements)  <-- 新增项
   for (int ell = 0; ell < E; ++ell) {
     double val = 0.0;
     
@@ -658,11 +638,6 @@ void RandFlash::assembleGlobalSystem(
         }
       }
     }
-    
-    // Term 2: Mass balance residual correction
-    // Newton step requirement: A * sum(dn) = Feed - sum(n_current)
-    // 根据 Paterson Eq 4.21 推导的修正，RHS 需要加上残差项
-    val += (feed_element_moles[ell] - current_element_moles[ell]);
 
     rhs[ell] = val;
   }
@@ -727,7 +702,7 @@ double RandFlash::lineSearch(
     bool positive = positive_after(alpha);
     bool descent  = (dir < -dir_eps) ? (alpha * dir < 0.0)
                                      : (std::abs(dir) <= dir_eps); 
-    if (positive && descent) break;
+    if (positive) break;
     alpha *= shrink;
   }
   if (alpha <= min_alpha) alpha = min_alpha;

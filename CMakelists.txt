@@ -30,6 +30,7 @@ endif()
 
 find_package(THERMOPACK CONFIG REQUIRED)
 
+find_package(GTest REQUIRED)
 # ===================== Eigen（通过 vcpkg） =====================
 find_package(Eigen3 CONFIG REQUIRED)
 

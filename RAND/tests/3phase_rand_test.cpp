@@ -61,13 +61,13 @@ int main() {
     // 组分顺序: 0:H2O, 1:C1, 2:nC6
     
     // 猜测相 1 (Vapor): 富含 C1
-    std::vector<double> guessV = { 0.01, 0.98, 0.01 }; 
+    std::vector<double> guessV = { 0.02, 0.78, 0.2 }; 
     
     // 猜测相 2 (Liquid 1 - Oil): 富含 nC6
-    std::vector<double> guessL1 = { 0.01, 0.05, 0.94 };
+    std::vector<double> guessL1 = { 0.02, 0.0004, 0.9796 };
     
     // 猜测相 3 (Liquid 2 - Aqueous): 富含 H2O
-    std::vector<double> guessL2 = { 0.99, 0.005, 0.005 };
+    std::vector<double> guessL2 = { 0.9999, 0.00005, 00005 };
 
     std::vector<std::vector<double>> initialComps = { guessV, guessL1, guessL2 };
 
