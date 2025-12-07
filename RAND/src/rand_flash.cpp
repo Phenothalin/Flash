@@ -13,269 +13,190 @@ using namespace randflash;
 using namespace ls;
 
 
-// === 在切空间做 SPD 修正，并保持 m x = 1 ===
+// === 在切空间做 SPD 修正，并保持 m x = 1 (使用 Woodbury 公式避免病态求逆) ===
+// 输入: solver, x, m_in (CxC)
+// 输出: PhaseFixResult (包含修正后的 M 和 m)
 static PhaseFixResult fix_phase_hessian_one_phase(
   ls::LinearSolverInterface& solver,
-  const std::vector<double>& x,                 // 相内 x
-  const std::vector<std::vector<double>>& m_in, // 相内 m
+  const std::vector<double>& x,                 
+  const std::vector<std::vector<double>>& m_in, 
   const PhaseFixOptions& opt = {})
 {
   const int C = static_cast<int>(x.size());
+  PhaseFixResult out;
+  
+  // 基础校验
   if (C == 0) {
-    PhaseFixResult out;
-    out.applied = false;
-    out.lam_min_before = 0.0;
-    out.lam_min_after  = 0.0;
-    out.m_fixed = m_in;
-    out.M_fixed = m_in;
-    return out;
-  }
-  if (static_cast<int>(m_in.size()) != C) {
-    throw std::invalid_argument("fix_phase_hessian_one_phase: m_in row size mismatch");
-  }
-  for (int i = 0; i < C; ++i) {
-    if (static_cast<int>(m_in[i].size()) != C) {
-      throw std::invalid_argument("fix_phase_hessian_one_phase: m_in must be CxC");
-    }
+    out.applied = false; return out;
   }
 
-  // 1) 对称部 ms = 0.5 * (m + m^T)
-  std::vector<std::vector<double>> ms(C, std::vector<double>(C, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int j = 0; j < C; ++j) {
-      ms[i][j] = 0.5 * (m_in[i][j] + m_in[j][i]);
-    }
+  // 1. 构建 Scaled Hessian Q 以及 Scaling 因子 D^{1/2}
+  //    m = D^{-1/2} Q D^{-1/2}, 其中 D = diag(x)
+  //    所以 Q_{ij} = sqrt(x_i) * m_{ij} * sqrt(x_j)
+  //    Q 是良态的 (特征值通常在 1 附近)
+  
+  std::vector<double> sqrt_x(C);
+  for(int i=0; i<C; ++i) sqrt_x[i] = std::sqrt(x[i]);
+
+  std::vector<double> Q_flat(C * C);
+  for(int i=0; i<C; ++i) {
+      for(int j=0; j<C; ++j) {
+          Q_flat[i*C + j] = sqrt_x[i] * m_in[i][j] * sqrt_x[j];
+      }
   }
 
-  // 2) 切空间基 B 和切空间内 Hessian mt = B^T ms B
-  auto B = ls::tangentBasis(C);     // C × (C-1)
+  // 2. 切空间投影与特征值分析 (基于 Q)
+  //    我们需要检查 Q 在切空间 (constrain: sum n_i = const) 上的正定性
+  //    切空间基 B (C x C-1)
+  //    实际上 Q 的特征向量 u 对应 m 的特征向量 v = D^{-1/2} u
+  
+  // 这里为了简单和保持逻辑一致，我们沿用论文的方法：
+  // 直接对 Q 矩阵进行特征值分解。因为 Q 是对称矩阵。
+  // 注意：m 矩阵必有一个特征值为 1 对应特征向量 x (因为 m*x = 1)
+  // 对应地，Q * sqrt(x) = sqrt(x)，因为:
+  // (sqrt(x) m sqrt(x)) * sqrt(x) = sqrt(x) * (m x) = sqrt(x) * 1
+  // 所以 Q 也有一个特征值为 1，特征向量为 sqrt(x)。这个方向是“非切空间”方向。
+  // 我们只需要检查除这个方向以外的最小特征值。
+
+  // 为了精确，还是使用切空间投影法
+  auto B = ls::tangentBasis(C); // C x (C-1)
   const int T = C - 1;
 
-  // tmp = ms * B   (C × T)
-  std::vector<std::vector<double>> tmp(C, std::vector<double>(T, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int k = 0; k < T; ++k) {
-      double s = 0.0;
-      for (int j = 0; j < C; ++j) {
-        s += ms[i][j] * B[j][k];
+  // Q_tan = B^T * Q * B
+  std::vector<double> Q_tan_flat(T * T, 0.0);
+  for(int p=0; p<T; ++p) {
+      for(int q=0; q<T; ++q) {
+          double val = 0.0;
+          for(int i=0; i<C; ++i) {
+              double temp = 0.0;
+              for(int j=0; j<C; ++j) {
+                  // Q_ij * B_jq
+                  temp += Q_flat[i*C+j] * B[j][q];
+              }
+              val += B[i][p] * temp;
+          }
+          Q_tan_flat[p*T + q] = val;
       }
-      tmp[i][k] = s;
-    }
   }
 
-  // mt = B^T * tmp  (T × T)
-  std::vector<std::vector<double>> mt(T, std::vector<double>(T, 0.0));
-  for (int p = 0; p < T; ++p) {
-    for (int q = 0; q < T; ++q) {
-      double s = 0.0;
-      for (int i = 0; i < C; ++i) {
-        s += B[i][p] * tmp[i][q];
-      }
-      mt[p][q] = s;
-    }
-  }
-
-  // 3) 计算切空间最小特征值
-  std::vector<double> mt_flat(T * T);
-  for (int i = 0; i < T; ++i) {
-    for (int j = 0; j < T; ++j) {
-      mt_flat[i * T + j] = mt[i][j];
-    }
-  }
   std::vector<double> evals;
-  std::vector<double> evecs;
-  solver.eigenDecomposeSymmetric(T, mt_flat, evals, evecs);
+  std::vector<double> evecs_sub; // 切空间特征向量
+  solver.eigenDecomposeSymmetric(T, Q_tan_flat, evals, evecs_sub);
 
-  PhaseFixResult out;
   if (evals.empty()) {
-    out.applied = false;
-    out.lam_min_before = 0.0;
-    out.lam_min_after  = 0.0;
-    out.m_fixed = m_in;
-    return out;
+      // C=1 的情况，没有切空间，直接返回
+      // M = x * x^T (单组分)
+      out.applied = false;
+      out.m_fixed = m_in;
+      out.M_fixed.assign(C, std::vector<double>(C));
+      out.M_fixed[0][0] = x[0]*x[0];
+      return out;
   }
 
-  const double lam_min = evals[0]; // 升序
+  double lam_min = evals[0];
   out.lam_min_before = lam_min;
-  // std::cout<<"lam_min: "<<lam_min;
 
-  double add = 0.0;
-  std::vector<std::vector<double>> mt_fixed = mt;
-  if (lam_min < opt.eig_floor) {
-    add = opt.eig_floor - lam_min + opt.eps_shift;
-    for (int i = 0; i < T; ++i) {
-      mt_fixed[i][i] += add;
-    }
-  }
-
+  // 3. 判断是否需要修正
   if (lam_min >= opt.eig_floor) {
-    // 不需要修正
-    out.applied = false;
-    out.lam_min_after = lam_min;
-    out.m_fixed = m_in;
-    return out;
-  }
-
-  // 4) 只回写切空间修正：m_tan = B * mt_fixed * B^T
-  std::vector<std::vector<double>> tmp2(C, std::vector<double>(T, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int k = 0; k < T; ++k) {
-      double s = 0.0;
-      for (int p = 0; p < T; ++p) {
-        s += B[i][p] * mt_fixed[p][k];
+      // 不需要修正，直接计算 M = m^{-1}
+      // 使用 Scaling 方法求逆以保证精度: M = D^{1/2} Q^{-1} D^{1/2}
+      
+      std::vector<double> Q_inv = solver.invertSPD(C, Q_flat);
+      
+      std::vector<std::vector<double>> M_calc(C, std::vector<double>(C));
+      for(int i=0; i<C; ++i) {
+          for(int j=0; j<C; ++j) {
+              M_calc[i][j] = sqrt_x[i] * Q_inv[i*C+j] * sqrt_x[j];
+          }
       }
-      tmp2[i][k] = s;
-    }
+      out.applied = false;
+      out.lam_min_after = lam_min;
+      out.m_fixed = m_in;
+      out.M_fixed = M_calc;
+      return out;
   }
 
-  std::vector<std::vector<double>> m_tan(C, std::vector<double>(C, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int j = 0; j < C; ++j) {
-      double s = 0.0;
-      for (int k = 0; k < T; ++k) {
-        s += tmp2[i][k] * B[j][k];
+  // 4. 需要修正：构造修正项
+  //    目标: m_new = m + k * v * v^T
+  //    其中 k = (target - lam_min), v 是 m 在切空间对应的特征向量
+  //    注意特征向量转换: u_tan (T维) -> u_full (C维, Q的特征向量) -> v (C维, m的修正向量)
+  
+  double target = std::abs(lam_min) + opt.eig_floor + opt.eps_shift; // 修正量
+  // 修正后的特征值设为略大于0的一个值，比如 0.001
+  // 这里 k 是加在特征值上的量
+  
+  // 4.1 恢复 Q 的最小特征向量 u
+  // u = B * evec_sub
+  std::vector<double> u(C, 0.0);
+  for(int i=0; i<C; ++i) {
+      for(int k=0; k<T; ++k) {
+          u[i] += B[i][k] * evecs_sub[0*T + k]; // evecs_sub 第一列是最小特征向量
       }
-      m_tan[i][j] = s;
-    }
+  }
+  
+  // 4.2 计算 m 的修正向量 v
+  // 论文定义修正项为 k * u * u^T 加在 Q 上
+  // 对应加在 m 上的项是 k * (D^{-1/2} u) * (D^{-1/2} u)^T
+  // 令 v_i = u_i / sqrt(x_i)
+  std::vector<double> v(C);
+  for(int i=0; i<C; ++i) {
+      v[i] = u[i] / sqrt_x[i];
   }
 
-  // 5) 构造 K = 1 z^T + z 1^T + gamma 11^T，强制 m x = 1
-  std::vector<double> ones(C, 1.0);
-
-  // r = 1 - m_tan * x
-  std::vector<double> mx(C, 0.0);
-  for (int i = 0; i < C; ++i) {
-    double s = 0.0;
-    for (int j = 0; j < C; ++j) {
-      s += m_tan[i][j] * x[j];
-    }
-    mx[i] = s;
-  }
-
-  std::vector<double> r(C);
-  for (int i = 0; i < C; ++i) {
-    r[i] = 1.0 - mx[i];
-  }
-
-  // 分解 r = r_perp + rho * 1
-  double rho = 0.0;
-  for (int i = 0; i < C; ++i) rho += r[i];
-  rho /= static_cast<double>(C);
-
-  std::vector<double> r_perp(C);
-  for (int i = 0; i < C; ++i) {
-    r_perp[i] = r[i] - rho * ones[i]; // ones[i]==1
-  }
-
-  // 设 z = r_perp, gamma = rho - r_perp^T x
-  std::vector<double> z = r_perp;
-  double rperp_dot_x = 0.0;
-  for (int i = 0; i < C; ++i) {
-    rperp_dot_x += r_perp[i] * x[i];
-  }
-  double gamma = rho - rperp_dot_x;
-
-  // K = 1 z^T + z 1^T + gamma 11^T
-  std::vector<std::vector<double>> m_fix(C, std::vector<double>(C, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int j = 0; j < C; ++j) {
-      double Kij = ones[i] * z[j] + z[i] * ones[j] + gamma * ones[i] * ones[j];
-      m_fix[i][j] = m_tan[i][j] + Kij;
-    }
-  }
-
-  // （可选）数值余量：轻微对称化，避免舍入
-  for (int i = 0; i < C; ++i) {
-    for (int j = i + 1; j < C; ++j) {
-      double avg = 0.5 * (m_fix[i][j] + m_fix[j][i]);
-      m_fix[i][j] = m_fix[j][i] = avg;
-    }
-  }
-
-  // 6) 检查切空间最小特征值（B^T m_fix B）
-  std::vector<std::vector<double>> tmp3(C, std::vector<double>(T, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int k = 0; k < T; ++k) {
-      double s = 0.0;
-      for (int j = 0; j < C; ++j) {
-        s += m_fix[i][j] * B[j][k];
+  // 5. 计算未修正的 M_raw (使用 Scaling 技巧)
+  //    M_raw = D^{1/2} Q^{-1} D^{1/2}
+  //    虽然 Q 有负特征值，但绝对值通常远离0，直接求逆通常是安全的（只要不是奇异）
+  //    如果不放心，可以对 Q 先做修正再求逆，但使用 Woodbury 公式更优雅
+  std::vector<double> Q_inv = solver.invertSPD(C, Q_flat);
+  
+  std::vector<std::vector<double>> M_raw(C, std::vector<double>(C));
+  for(int i=0; i<C; ++i) {
+      for(int j=0; j<C; ++j) {
+          M_raw[i][j] = sqrt_x[i] * Q_inv[i*C+j] * sqrt_x[j];
       }
-      tmp3[i][k] = s;
-    }
   }
 
-  std::vector<std::vector<double>> mt_chk(T, std::vector<double>(T, 0.0));
-  for (int p = 0; p < T; ++p) {
-    for (int q = 0; q < T; ++q) {
-      double s = 0.0;
-      for (int i = 0; i < C; ++i) {
-        s += B[i][p] * tmp3[i][q];
+  // 6. 使用 Woodbury 公式更新 M
+  //    (m + k v v^T)^{-1} = M - (k (M v) (M v)^T) / (1 + k v^T M v)
+  
+  double k_val = target; 
+
+  // 计算 temp = M_raw * v
+  std::vector<double> Mv(C, 0.0);
+  for(int i=0; i<C; ++i) {
+      for(int j=0; j<C; ++j) {
+          Mv[i] += M_raw[i][j] * v[j];
       }
-      mt_chk[p][q] = s;
-    }
   }
 
-  std::vector<double> mt_chk_flat(T * T);
-  for (int i = 0; i < T; ++i) {
-    for (int j = 0; j < T; ++j) {
-      mt_chk_flat[i * T + j] = mt_chk[i][j];
-    }
-  }
-  std::vector<double> evals_chk;
-  std::vector<double> evecs_chk;
-  solver.eigenDecomposeSymmetric(T, mt_chk_flat, evals_chk, evecs_chk);
-  if (!evals_chk.empty()) {
-    out.lam_min_after = evals_chk[0];
-  } else {
-    out.lam_min_after = 0.0;
-  }
+  // 计算分母 denom = 1 + k * v^T * M * v
+  double vMv = 0.0;
+  for(int i=0; i<C; ++i) vMv += v[i] * Mv[i];
+  
+  double denom = 1.0 + k_val * vMv;
 
-  // 7) 求逆：M_fix = m_fix^{-1}
-  std::vector<double> m_fix_flat(C * C);
-  for (int i = 0; i < C; ++i) {
-    for (int j = 0; j < C; ++j) {
-      m_fix_flat[i * C + j] = m_fix[i][j];
-    }
-  }
-  std::vector<double> M_flat = solver.invertSPD(C, m_fix_flat);
-  std::vector<std::vector<double>> M_fix(C, std::vector<double>(C, 0.0));
-  for (int i = 0; i < C; ++i) {
-    for (int j = 0; j < C; ++j) {
-      M_fix[i][j] = M_flat[i * C + j];
-    }
-  }
-
-  // 不变量核验：M*1 是否等于 x（理论上应当精确成立）
-  std::vector<double> M1(C, 0.0);
-  for (int i = 0; i < C; ++i) {
-    double s = 0.0;
-    for (int j = 0; j < C; ++j) {
-      s += M_fix[i][j] * ones[j];
-    }
-    M1[i] = s;
-  }
-
-  std::vector<double> diff(C, 0.0);
-  double diff2 = 0.0;
-  for (int i = 0; i < C; ++i) {
-    diff[i] = M1[i] - x[i];
-    diff2 += diff[i] * diff[i];
-  }
-
-  if (std::sqrt(diff2) > 1e-9) {
-    const double invC = 1.0 / static_cast<double>(C);
-    // 极小对称化补偿（理论上用不到）
-    for (int i = 0; i < C; ++i) {
-      for (int j = 0; j < C; ++j) {
-        M_fix[i][j] -= 0.5 * (diff[i] + diff[j]) * invC;
+  // 更新得到 M_fixed
+  std::vector<std::vector<double>> M_fix(C, std::vector<double>(C));
+  for(int i=0; i<C; ++i) {
+      for(int j=0; j<C; ++j) {
+          M_fix[i][j] = M_raw[i][j] - (k_val / denom) * Mv[i] * Mv[j];
       }
-    }
   }
 
-  // 输出
-  out.applied = (add > 0.0);     // 只有切空间真做了移位才算“应用”
-  out.m_fixed = std::move(m_fix);
-  out.M_fixed = std::move(M_fix);
+  // 7. 更新 m_fixed (仅用于调试或完整性，主要用的是 M)
+  //    m_fixed = m_in + k * v * v^T
+  std::vector<std::vector<double>> m_fix = m_in;
+  for(int i=0; i<C; ++i) {
+      for(int j=0; j<C; ++j) {
+          m_fix[i][j] += k_val * v[i] * v[j];
+      }
+  }
+
+  out.applied = true;
+  out.lam_min_after = lam_min + k_val; // 近似值
+  out.m_fixed = m_fix;
+  out.M_fixed = M_fix;
+
   return out;
 }
 
@@ -831,14 +752,14 @@ void RandFlash::backSubstituteDeltas(
   }
 
   // 通用打印逻辑，支持任意相数
-  std::cout << "\n  [BackSub] Deltas (dn):";
-  for (size_t j = 0; j < F; ++j) {
-      std::cout << "\n    Phase " << j << ": ";
-      for (double val : dnPhases[j]) {
-          std::cout << val << " ";
-      }
-  }
-  std::cout << "\n" << std::endl;
+  // std::cout << "\n  [BackSub] Deltas (dn):";
+  // for (size_t j = 0; j < F; ++j) {
+  //     std::cout << "\n    Phase " << j << ": ";
+  //     for (double val : dnPhases[j]) {
+  //         std::cout << val << " ";
+  //     }
+  // }
+  // std::cout << "\n" << std::endl;
 }
 
 
@@ -865,11 +786,10 @@ void RandFlash::applyUpdate(
       nPhases_inout, dnPhases, gPhases,
       1.0, 1e-10, 0.5);
 
-  std::cout << "  线搜索步长 alpha = " << alpha << std::endl;
+  std::cout << "  线搜索步长 alpha = " << std::fixed << std::setprecision(4)<<alpha << std::endl;
 
   // 更新 n，并执行 Clamping
   const double min_mole_floor = 1e-20; // 物理下限
-
   for(size_t j=0; j<nPhases_inout.size(); ++j) {
       for(size_t i=0; i<nPhases_inout[j].size(); ++i) {
           double new_val = nPhases_inout[j][i] + alpha * dnPhases[j][i];
@@ -882,13 +802,32 @@ void RandFlash::applyUpdate(
       }
   }
 
-  // 打印简单的更新信息 (可选: 仅打印 beta 以简化日志)
-  std::cout << "  更新后 Betas: ";
+  // 打印各相总摩尔数 (Beta)
+  std::cout << "  更新后各相总摩尔数 (Beta): ";
   for(size_t j=0; j<F; ++j) {
-      double b = std::accumulate(nPhases_inout[j].begin(), nPhases_inout[j].end(), 0.0);
-      std::cout << b << " ";
+      double beta_j = std::accumulate(nPhases_inout[j].begin(), nPhases_inout[j].end(), 0.0);
+      std::cout << std::fixed << std::setprecision(6) << beta_j << " ";
   }
-  std::cout << "\n\n";
+  std::cout << "\n";
+
+  // ========== 新增：打印各相摩尔分率（固定小数位，无科学计数法） ==========
+  std::cout << "  更新后各相摩尔分率:\n";
+  for(size_t j=0; j<F; ++j) {
+      // 计算当前相的总摩尔数
+      double beta_j = std::accumulate(nPhases_inout[j].begin(), nPhases_inout[j].end(), 0.0);
+      // 防止除以0（理论上不会触发，因有min_mole_floor）
+      beta_j = std::max(beta_j, min_mole_floor);
+
+      std::cout << "    相 " << j+1 << ": ";
+      for(size_t i=0; i<nPhases_inout[j].size(); ++i) {
+          // 计算摩尔分率
+          double mole_frac = nPhases_inout[j][i] / beta_j;
+          // 输出格式：固定8位小数（无科学计数法），覆盖0~1范围的精度需求
+          std::cout << std::fixed << std::setprecision(8) << mole_frac << " ";
+      }
+      std::cout << "\n";
+  }
+  std::cout << "\n";
 }
 
 // 7) 收敛判断：打印与返回布尔值（阈值保持原样：elem_error < 1e-8）

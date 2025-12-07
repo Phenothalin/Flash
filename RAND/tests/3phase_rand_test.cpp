@@ -67,14 +67,14 @@ int main() {
     std::vector<double> guessL1 = { 0.02, 0.0004, 0.9796 };
     
     // 猜测相 3 (Liquid 2 - Aqueous): 富含 H2O
-    std::vector<double> guessL2 = { 0.9999, 0.00005, 00005 };
+    std::vector<double> guessL2 = { 0.9999, 0.00005, 0.00005 };
 
     std::vector<std::vector<double>> initialComps = { guessV, guessL1, guessL2 };
 
     std::cout << "Starting 3-Phase Flash Calculation (Water + Methane + n-Hexane)...\n";
 
     // 5) 调用多相闪蒸接口
-    int    maxIter = 30;
+    int    maxIter = 20;
     double tol     = 1e-8;
 
     auto res = flash.solveMultiPhase(

@@ -143,7 +143,11 @@ private:
     const SystemContext& sys,                
     const std::vector<double>& vaporGuess,                 
     const std::vector<double>& liquidGuess,                
-    double margin = 1e-3) const;                           
+    double margin = 1e-3) const;     
+
+  InitResult initializeThreePhaseWater(
+    const SystemContext& sys, 
+    double margin = 1e-10) const;
 
   // === 【修改 1】通用化 LineSearch ===
   double lineSearch(
