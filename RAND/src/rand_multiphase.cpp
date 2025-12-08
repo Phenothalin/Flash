@@ -360,7 +360,7 @@ MultiFlashResult RandFlash::solveMultiPhase(
   // 目前：如果用户没给初值，就默认 2 相；
   // 如果给了，就用给的相数；但核心仍只接受 2 相。
   int F = initialPhaseCompositions.empty()
-        ? 3
+        ? 2
         : static_cast<int>(initialPhaseCompositions.size());
 
   return solveMultiPhaseCore(

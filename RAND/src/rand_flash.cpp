@@ -36,7 +36,7 @@ static PhaseFixResult fix_phase_hessian_one_phase(
   //    Q 是良态的 (特征值通常在 1 附近)
   
   std::vector<double> sqrt_x(C);
-  for(int i=0; i<C; ++i) sqrt_x[i] = std::sqrt(x[i]);
+  for(int i=0; i<C; ++i) sqrt_x[i] = sqrt(x[i]);
 
   std::vector<double> Q_flat(C * C);
   for(int i=0; i<C; ++i) {

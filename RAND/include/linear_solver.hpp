@@ -127,7 +127,7 @@ inline std::vector<std::vector<double>> tangentBasis(int C){
     for (int r = 0; r < C; ++r) {
       nrm2 += B[r][j] * B[r][j];
     }
-    double nrm = std::sqrt(nrm2);
+    double nrm = sqrt(nrm2);
     if (nrm < 1e-14) { // 退化保护：随机扰动再正交
       for (int r = 0; r < C; ++r) {
         B[r][j] = static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX);
@@ -145,7 +145,7 @@ inline std::vector<std::vector<double>> tangentBasis(int C){
       for (int r = 0; r < C; ++r) {
         nrm2 += B[r][j] * B[r][j];
       }
-      nrm = std::sqrt(nrm2);
+      nrm = sqrt(nrm2);
       if (nrm < 1e-14) {
         throw std::runtime_error("tangentBasis: failed to build non-degenerate basis");
       }
