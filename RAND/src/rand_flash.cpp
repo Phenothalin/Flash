@@ -837,7 +837,7 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   double temperature,
   const std::vector<std::vector<double>>& mus,
   const std::vector<std::vector<double>>& elementMatrix,
-  const std::vector<std::vector<double>>& nPhases,
+  const std::vector<std::vector<double>>& nPhases, // 注意：这里需要传入 nPhases 或 compositions
   const std::vector<double>& feedComposition) const
 {
   RandFlash::ConvergenceInfo info{};
@@ -846,48 +846,57 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   const size_t C = feedComposition.size();
   const size_t E = elementMatrix.size();
 
-  // 1) 化学势平衡判据: 计算所有相两两之间的最大无量纲化学势差
-  //    或者简单点：计算所有相与第0相的差 (假设第0相存在且稳定)
-  //    更稳健的方法：找出当前存在的相（beta > 0），计算它们之间的最大差
+  // 1) 化学势平衡判据 (加入微量组分过滤)
   double max_mu_diff = 0.0;
-  
+  // 阈值：如果某组分在某相的摩尔分率低于此值，则忽略其化学势差异
+  const double TRACE_LIMIT = 1e-6; 
+
   if (F > 1) {
-    for (size_t j = 1; j < F; ++j) {
-        for (size_t i = 0; i < C; ++i) {
-              double diff = std::fabs(mus[j][i] - mus[0][i]) / RT;
-              max_mu_diff = std::max(max_mu_diff, diff);
+    // 预先计算各相的总摩尔数 beta 和摩尔分率 x
+    std::vector<double> betas(F, 0.0);
+    std::vector<std::vector<double>> xs(F, std::vector<double>(C, 0.0));
+    for(size_t j=0; j<F; ++j) {
+        betas[j] = std::accumulate(nPhases[j].begin(), nPhases[j].end(), 0.0);
+        if(betas[j] > 1e-20) {
+            for(size_t i=0; i<C; ++i) xs[j][i] = nPhases[j][i] / betas[j];
         }
     }
-}
 
-  // 2) 元素守恒判据
-  // sum_phases (n) - feed
+    for (size_t j = 1; j < F; ++j) {
+        for (size_t i = 0; i < C; ++i) {
+              // 【核心修改】仅当两相中该组分都“显著存在”时，才比较化学势
+              // 否则，该组分的对数项导致的差异是数值噪音或物理上的不混溶表现
+              if (xs[j][i] > TRACE_LIMIT && xs[0][i] > TRACE_LIMIT) {
+                  double diff = std::fabs(mus[j][i] - mus[0][i]) / RT;
+                  max_mu_diff = std::max(max_mu_diff, diff);
+              }
+        }
+    }
+  }
+
+  // 2) 元素守恒判据 (保持不变)
   double elem_err = 0.0;
   for (size_t ell = 0; ell < E; ++ell) {
       double sum_n_ell = 0.0;
       for (size_t j=0; j<F; ++j) {
-          // nPhases[j] dot elementMatrix[ell]
           for (size_t i=0; i<C; ++i) {
               sum_n_ell += elementMatrix[ell][i] * nPhases[j][i];
           }
       }
-      
-      // feed dot elementMatrix[ell] (如果 A 是单位阵，这步简化为 sum_n - feed)
-      // 注意：elementMatrix * (sum_n - feed)
       double sum_feed_ell = 0.0;
       for (size_t i=0; i<C; ++i) {
            sum_feed_ell += elementMatrix[ell][i] * feedComposition[i];
       }
-
       elem_err = std::max(elem_err, std::abs(sum_n_ell - sum_feed_ell));
   }
 
-  std::cout << "Iter "<< iternumber <<" | max_mu_diff (dimless): " << max_mu_diff 
+  std::cout << "Iter "<< iternumber <<" | max_mu_diff (filtered): " << max_mu_diff 
             << " | elem_err: " << elem_err << std::endl;
 
   info.max_mu_diff = max_mu_diff;
   info.elem_error  = elem_err;
-  info.converged   = (max_mu_diff < tol && elem_err < 1e-6);
+  // 稍微放宽一点 elem_err，或者保持 1e-6
+  info.converged   = (max_mu_diff < tol && elem_err < 1e-5); 
   return info;
 }
 

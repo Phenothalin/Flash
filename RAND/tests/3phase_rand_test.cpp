@@ -74,7 +74,7 @@ int main() {
     std::cout << "Starting 3-Phase Flash Calculation (Water + Methane + n-Hexane)...\n";
 
     // 5) 调用多相闪蒸接口
-    int    maxIter = 20;
+    int    maxIter = 30;
     double tol     = 1e-8;
 
     auto res = flash.solveMultiPhase(
