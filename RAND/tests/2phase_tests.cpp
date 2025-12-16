@@ -67,7 +67,9 @@ protected:
         double tol = 1e-8;
 
         auto res = flash.solveMultiPhase(input, elementMatrix, {}, maxIter, tol);
-
+        if(res.success){
+            flash.printResult(res);
+        }
         // 5. 验证
         EXPECT_TRUE(res.success) << "[" << caseName << "] Flash calculation failed.";
     }

@@ -1,4 +1,6 @@
 #include "rand_flash.hpp"
+#include "phase_stability.hpp"
+#include <algorithm>
 #include <numeric>
 #include <cmath>
 #include <cassert>
@@ -6,6 +8,81 @@
 #include <stdexcept>
 using namespace randflash;
 using namespace ls;
+
+namespace {
+
+static int find_water_index(const thermo::IThermoBackend& thermo, size_t C) {
+    const auto names = thermo.getComponentNames();
+    for (size_t i = 0; i < std::min(names.size(), C); ++i) {
+        std::string n = names[i];
+        std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+        if (n == "H2O" || n == "WATER" || n.find("H2O") != std::string::npos) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+static void reorder_flash_result(
+    MultiFlashResult& res,
+    const std::vector<int>& phaseFlags,
+    int vaporFlag,
+    int liquidFlag,
+    int water_idx)
+{
+    const size_t F = res.n_phase.size();
+    if (F <= 1 || phaseFlags.size() != F) return;
+
+    // Build (idx, isVap, beta, x_water)
+    struct Key {
+        size_t idx;
+        bool isVap;
+        double beta;
+        double xw;
+    };
+    std::vector<Key> keys;
+    keys.reserve(F);
+
+    for (size_t j = 0; j < F; ++j) {
+        double beta = 0.0;
+        for (double v : res.n_phase[j]) beta += v;
+        double xw = 0.0;
+        if (water_idx >= 0 && beta > 0.0 && static_cast<size_t>(water_idx) < res.n_phase[j].size()) {
+            xw = res.n_phase[j][static_cast<size_t>(water_idx)] / beta;
+        }
+        keys.push_back(Key{j, phaseFlags[j] == vaporFlag, beta, xw});
+    }
+
+    // Primary sort: vapor first
+    // Secondary: for liquids, if water exists and there are >=2 liquids, order by water fraction ascending
+    // Otherwise: by beta descending
+    const bool hasWater = (water_idx >= 0);
+    const int nLiq = static_cast<int>(std::count_if(keys.begin(), keys.end(), [](const Key& k){ return !k.isVap; }));
+
+    std::sort(keys.begin(), keys.end(), [&](const Key& a, const Key& b){
+        if (a.isVap != b.isVap) return a.isVap > b.isVap;
+        if (!a.isVap && !b.isVap && hasWater && nLiq >= 2) {
+            // oil first (low xw), water-rich later
+            if (std::abs(a.xw - b.xw) > 1e-8) return a.xw < b.xw;
+        }
+        return a.beta > b.beta;
+    });
+
+    // Apply permutation
+    std::vector<std::vector<double>> n_new;
+    std::vector<double> beta_new;
+    n_new.reserve(F);
+    beta_new.reserve(F);
+
+    for (const auto& k : keys) {
+        n_new.push_back(res.n_phase[k.idx]);
+        beta_new.push_back(res.beta.empty() ? k.beta : res.beta[k.idx]);
+    }
+    res.n_phase.swap(n_new);
+    res.beta.swap(beta_new);
+}
+
+} // anonymous namespace
 
 // ----------------------------------------------------------------------------------
 // 完善后的三相含水体系初始化：顺序拆分策略 (Sequential Splitting)
@@ -217,11 +294,190 @@ InitResult RandFlash::initializeThreePhaseWater(
     return out;
 }
 
+// ----------------------------------------------------------------------------------
+// 通用：由“相组成猜测”生成满足严格守恒的初始 n（最小二乘 beta + 行缩放）
+// - phaseCompositions: F x C（可不严格归一，内部会归一）
+// - phaseFlags: F (可为空；为空则默认 0 为气相，其余为液相)
+// ----------------------------------------------------------------------------------
+InitResult RandFlash::initializeFromCompositions(
+    const SystemContext& sys,
+    int nPhases,
+    const std::vector<std::vector<double>>& phaseCompositions,
+    const std::vector<int>& phaseFlags,
+    double min_phase_moles_ratio) const
+{
+    const size_t C = sys.feedMoles.size();
+    if (nPhases <= 0) throw std::invalid_argument("initializeFromCompositions: nPhases <= 0");
+    if ((int)phaseCompositions.size() != nPhases) {
+        throw std::invalid_argument("initializeFromCompositions: phaseCompositions.size() != nPhases");
+    }
+
+    const double total_feed = std::accumulate(sys.feedMoles.begin(), sys.feedMoles.end(), 0.0);
+
+    // 1) 归一化组成
+    std::vector<std::vector<double>> X_norm(nPhases, std::vector<double>(C, 0.0));
+    for (int j = 0; j < nPhases; ++j) {
+        double s = (j < (int)phaseCompositions.size())
+                 ? std::accumulate(phaseCompositions[j].begin(), phaseCompositions[j].end(), 0.0)
+                 : 0.0;
+        if (s < 1e-30) s = 1.0;
+        for (size_t i = 0; i < C; ++i) {
+            double v = (i < phaseCompositions[j].size()) ? phaseCompositions[j][i] / s : 0.0;
+            if (!std::isfinite(v) || v < 0.0) v = 0.0;
+            X_norm[j][i] = v;
+        }
+        // 若全 0，退化为均匀
+        double s2 = std::accumulate(X_norm[j].begin(), X_norm[j].end(), 0.0);
+        if (s2 <= 0.0) {
+            const double uni = 1.0 / static_cast<double>(C);
+            std::fill(X_norm[j].begin(), X_norm[j].end(), uni);
+        } else {
+            for (double& v : X_norm[j]) v /= s2;
+        }
+    }
+
+    // 2) 正规方程 A * beta = b
+    std::vector<double> A_ls(nPhases * nPhases, 0.0);
+    std::vector<double> b_ls(nPhases, 0.0);
+    for (int j = 0; j < nPhases; ++j) {
+        for (size_t i = 0; i < C; ++i) {
+            b_ls[j] += X_norm[j][i] * sys.feedMoles[i];
+        }
+        for (int k = 0; k < nPhases; ++k) {
+            double dot = 0.0;
+            for (size_t i = 0; i < C; ++i) dot += X_norm[j][i] * X_norm[k][i];
+            A_ls[j * nPhases + k] = dot;
+        }
+    }
+
+    double dummy_res = 0.0;
+    std::vector<double> betas = linearSolver_.solveDense(nPhases, A_ls, b_ls, &dummy_res);
+
+    // 3) beta 下限保护
+    const double min_beta = std::max(1e-12, min_phase_moles_ratio * total_feed);
+    for (double& b : betas) {
+        if (!std::isfinite(b) || b < min_beta) b = min_beta;
+    }
+
+    // 4) 初步 n = beta * x，然后按组分行缩放保证严格守恒
+    std::vector<std::vector<double>> n_temp(nPhases, std::vector<double>(C, 0.0));
+    std::vector<double> n_sum(C, 0.0);
+    for (int j = 0; j < nPhases; ++j) {
+        for (size_t i = 0; i < C; ++i) {
+            n_temp[j][i] = betas[j] * X_norm[j][i];
+            n_sum[i] += n_temp[j][i];
+        }
+    }
+    for (size_t i = 0; i < C; ++i) {
+        const double target = sys.feedMoles[i];
+        const double current = n_sum[i];
+        if (current > 1e-30) {
+            const double scale = target / current;
+            for (int j = 0; j < nPhases; ++j) n_temp[j][i] *= scale;
+        } else {
+            // 所有相对该组分都为 0，但进料不为 0：平均分配
+            for (int j = 0; j < nPhases; ++j) n_temp[j][i] = target / static_cast<double>(nPhases);
+        }
+    }
+
+    // 5) 输出
+    InitResult out;
+    out.n_phases = n_temp;
+    out.beta.resize(nPhases, 0.0);
+    out.compositions.resize(nPhases, std::vector<double>(C, 0.0));
+    for (int j = 0; j < nPhases; ++j) {
+        out.beta[j] = std::accumulate(out.n_phases[j].begin(), out.n_phases[j].end(), 0.0);
+        out.compositions[j] = out.n_phases[j];
+        if (out.beta[j] > 1e-30) {
+            const double invB = 1.0 / out.beta[j];
+            for (double& v : out.compositions[j]) v *= invB;
+        } else {
+            const double uni = 1.0 / static_cast<double>(C);
+            std::fill(out.compositions[j].begin(), out.compositions[j].end(), uni);
+        }
+    }
+
+    (void)phaseFlags; // phaseFlags 由调用处决定如何赋给 PhaseState
+    return out;
+}
+
+// ----------------------------------------------------------------------------------
+// 通用三相初始化：
+// 1) 若检测到 H2O 且含量显著，优先使用顺序拆分（水相/油相/气相）
+// 2) 否则：基于 Wilson-K 构造 Vapor / Heavy-Liquid / Intermediate-Liquid 三个组成猜测
+// 再用 initializeFromCompositions 生成严格守恒的 n。
+// ----------------------------------------------------------------------------------
+InitResult RandFlash::initializeThreePhaseGeneric(const SystemContext& sys, double margin) const
+{
+    const size_t C = sys.feedMoles.size();
+    if (C == 0) return {};
+
+    // 归一化 z
+    const double Ftot = std::accumulate(sys.feedMoles.begin(), sys.feedMoles.end(), 0.0);
+    std::vector<double> z = sys.feedMoles;
+    if (Ftot > 1e-30) {
+        for (double& v : z) v /= Ftot;
+    } else {
+        const double uni = 1.0 / static_cast<double>(C);
+        std::fill(z.begin(), z.end(), uni);
+    }
+
+    // 识别水
+    auto names = thermo_.getComponentNames();
+    int water_idx = -1;
+    for (size_t i = 0; i < std::min(names.size(), C); ++i) {
+        std::string n = names[i];
+        std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+        if (n == "H2O" || n == "WATER" || n.find("H2O") != std::string::npos) {
+            water_idx = static_cast<int>(i);
+            break;
+        }
+    }
+    const double z_water = (water_idx >= 0) ? z[water_idx] : 0.0;
+    if (water_idx >= 0 && z_water > 1e-4) {
+        // 直接复用你已经验证过的含水初始化
+        return initializeThreePhaseWater(sys, margin);
+    }
+
+    // Wilson K
+    std::vector<double> K(C, 1.0);
+    thermo_.wilsonK(sys.temperature, sys.pressure, K);
+    for (double& Ki : K) Ki = std::clamp(Ki, 1e-8, 1e8);
+
+    auto normalize = [&](std::vector<double> x) {
+        for (double& v : x) v = std::max(v, margin);
+        double s = std::accumulate(x.begin(), x.end(), 0.0);
+        if (s <= 0.0) {
+            const double uni = 1.0 / static_cast<double>(C);
+            std::fill(x.begin(), x.end(), uni);
+            return x;
+        }
+        for (double& v : x) v /= s;
+        return x;
+    };
+
+    // 三个组成猜测
+    std::vector<double> xV(C), xLh(C), xLi(C);
+    for (size_t i = 0; i < C; ++i) {
+        xV[i]  = z[i] * K[i];                 // vapor-like
+        xLh[i] = z[i] / K[i];                 // heavy liquid-like
+        xLi[i] = z[i] / std::sqrt(K[i]);      // intermediate liquid-like
+    }
+    xV  = normalize(xV);
+    xLh = normalize(xLh);
+    xLi = normalize(xLi);
+
+    std::vector<std::vector<double>> comps = {xV, xLh, xLi};
+    std::vector<int> flags = {thermo_.vaporPhaseFlag(), thermo_.liquidPhaseFlag(), thermo_.liquidPhaseFlag()};
+    return initializeFromCompositions(sys, 3, comps, flags);
+}
+
   MultiFlashResult RandFlash::solveMultiPhaseCore(
   const FlashInput& input,
   int nPhases,
   const std::vector<std::vector<double>>& elementMatrix,
   const std::vector<std::vector<double>>& initialPhaseCompositions,
+  const std::vector<int>& initialPhaseFlags,
   int maxIter,
   double tol)
 {
@@ -239,95 +495,40 @@ InitResult RandFlash::initializeThreePhaseWater(
     // 情况 A: 两相且无初值 -> 调用标准两相初始化
     if (nPhases == 2 && initialPhaseCompositions.empty()) {
         auto init = initializeTwoPhase(sys, {}, {});
-        sys.phases[0].state = {input.temperature, input.pressure, init.n_phases[0], thermo_.vaporPhaseFlag()};
-        sys.phases[1].state = {input.temperature, input.pressure, init.n_phases[1], thermo_.liquidPhaseFlag()};
+        std::vector<int> flags = initialPhaseFlags;
+        if ((int)flags.size() != 2) {
+            flags = {thermo_.vaporPhaseFlag(), thermo_.liquidPhaseFlag()};
+        }
+        sys.phases[0].state = {input.temperature, input.pressure, init.n_phases[0], flags[0]};
+        sys.phases[1].state = {input.temperature, input.pressure, init.n_phases[1], flags[1]};
         initialized = true;
     } 
-    // 情况 B: 三相且无初值 -> 调用含水三相特殊初始化 (需配合之前给出的 initializeThreePhaseWater 实现)
+    // 情况 B: 三相且无初值 -> 调用通用三相初始化
     else if (nPhases == 3 && initialPhaseCompositions.empty()) {
-        // 确保你的类中已经添加了 initializeThreePhaseWater
-        auto init = initializeThreePhaseWater(sys);
-        sys.phases[0].state = {input.temperature, input.pressure, init.n_phases[0], thermo_.vaporPhaseFlag()};
-        sys.phases[1].state = {input.temperature, input.pressure, init.n_phases[1], thermo_.liquidPhaseFlag()};
-        sys.phases[2].state = {input.temperature, input.pressure, init.n_phases[2], thermo_.liquidPhaseFlag()};
+        auto init = initializeThreePhaseGeneric(sys);
+        std::vector<int> flags = initialPhaseFlags;
+        if ((int)flags.size() != 3) {
+            flags = {thermo_.vaporPhaseFlag(), thermo_.liquidPhaseFlag(), thermo_.liquidPhaseFlag()};
+        }
+        sys.phases[0].state = {input.temperature, input.pressure, init.n_phases[0], flags[0]};
+        sys.phases[1].state = {input.temperature, input.pressure, init.n_phases[1], flags[1]};
+        sys.phases[2].state = {input.temperature, input.pressure, init.n_phases[2], flags[2]};
         initialized = true;
     }
     // 情况 C: 有用户提供的初值 -> 最小二乘投影 + 强制守恒缩放
     else if (!initialPhaseCompositions.empty()) {
         if ((int)initialPhaseCompositions.size() != nPhases) {
-             std::cerr << "[Warning] Initial compositions count != nPhases. Using default logic.\n";
+            std::cerr << "[Warning] Initial compositions count != nPhases. Using default logic.\n";
         } else {
-            // 1. 准备归一化的组成矩阵 X (C x F)
-            std::vector<std::vector<double>> X_norm(nPhases, std::vector<double>(C));
-            for(int j=0; j<nPhases; ++j) {
-                double s = std::accumulate(initialPhaseCompositions[j].begin(), initialPhaseCompositions[j].end(), 0.0);
-                if (s < 1e-15) s = 1.0; 
-                for(size_t i=0; i<C; ++i) X_norm[j][i] = initialPhaseCompositions[j][i] / s;
+            std::vector<int> flags = initialPhaseFlags;
+            if ((int)flags.size() != nPhases) {
+                flags.assign(nPhases, thermo_.liquidPhaseFlag());
+                flags[0] = thermo_.vaporPhaseFlag();
             }
 
-            // 2. 构建正规方程 A * beta = b
-            // A = X^T * X (F x F), b = X^T * z (F x 1)
-            // 这里的 z 是 input.feedMoles
-            std::vector<double> A_ls(nPhases * nPhases, 0.0);
-            std::vector<double> b_ls(nPhases, 0.0);
-
+            auto init = initializeFromCompositions(sys, nPhases, initialPhaseCompositions, flags);
             for (int j = 0; j < nPhases; ++j) {
-                // 构建 b_ls[j] = x_j . z
-                for (size_t i = 0; i < C; ++i) {
-                    b_ls[j] += X_norm[j][i] * input.feedMoles[i];
-                }
-                // 构建 A_ls[j][k] = x_j . x_k
-                for (int k = 0; k < nPhases; ++k) {
-                    double dot = 0.0;
-                    for (size_t i = 0; i < C; ++i) {
-                        dot += X_norm[j][i] * X_norm[k][i];
-                    }
-                    A_ls[j * nPhases + k] = dot;
-                }
-            }
-
-            // 3. 求解 Beta
-            // 使用传入的线性求解器解小规模方程
-            double dummy_res = 0.0;
-            std::vector<double> betas = linearSolver_.solveDense(nPhases, A_ls, b_ls, &dummy_res);
-
-            // 4. Beta 修正 (防止负值或过小)
-            double total_feed = std::accumulate(input.feedMoles.begin(), input.feedMoles.end(), 0.0);
-            for(double& b : betas) {
-                if(b < 1e-5 * total_feed) b = 1e-5 * total_feed;
-            }
-
-            // 5. 生成初步 n 并进行强制行缩放 (Row-wise Scaling)
-            // 这是保证 Element Balance 残差为 0 的关键步骤
-            std::vector<std::vector<double>> n_temp(nPhases, std::vector<double>(C));
-            std::vector<double> n_sum(C, 0.0);
-
-            // 5.1 初步计算 n = beta * x
-            for(int j=0; j<nPhases; ++j) {
-                for(size_t i=0; i<C; ++i) {
-                    n_temp[j][i] = betas[j] * X_norm[j][i];
-                    n_sum[i] += n_temp[j][i];
-                }
-            }
-
-            // 5.2 强制缩放：n_final = n_temp * (z_i / sum_n_i)
-            for(size_t i=0; i<C; ++i) {
-                double target = input.feedMoles[i];
-                double current = n_sum[i];
-                double scale = (current > 1e-20) ? (target / current) : 0.0;
-                
-                // 如果当前组分在所有相中都为0，但进料不为0，则平均分配
-                if (current <= 1e-20 && target > 1e-20) {
-                    for(int j=0; j<nPhases; ++j) n_temp[j][i] = target / nPhases;
-                } else {
-                    for(int j=0; j<nPhases; ++j) n_temp[j][i] *= scale;
-                }
-            }
-
-            // 6. 赋值给 SystemContext
-            for(int j=0; j<nPhases; ++j) {
-                int flag = (j==0 ? thermo_.vaporPhaseFlag() : thermo_.liquidPhaseFlag());
-                sys.phases[j].state = {input.temperature, input.pressure, n_temp[j], flag};
+                sys.phases[j].state = {input.temperature, input.pressure, init.n_phases[j], flags[j]};
             }
             initialized = true;
             std::cout << "[Init] Initialized " << nPhases << " phases with Least-Squares + Strict Element Scaling.\n";
@@ -340,36 +541,235 @@ InitResult RandFlash::initializeThreePhaseWater(
         std::vector<double> n = input.feedMoles;
         double split = 1.0 / nPhases;
         for(auto& val : n) val *= split;
+        std::vector<int> flags = initialPhaseFlags;
+        if ((int)flags.size() != nPhases) {
+            flags.assign(nPhases, thermo_.liquidPhaseFlag());
+            flags[0] = thermo_.vaporPhaseFlag();
+        }
         for(int j=0; j<nPhases; ++j) {
-            int flag = (j==0 ? thermo_.vaporPhaseFlag() : thermo_.liquidPhaseFlag());
+            int flag = flags[j];
             sys.phases[j].state = {input.temperature, input.pressure, n, flag};
         }
     }
 
     // 3. 核心求解
-    return solveGeneral(sys, maxIter, tol);
+    auto res = solveGeneral(sys, maxIter, tol);
+
+    // 4. 结果相序统一：Vapor -> (Oil-like liquid) -> (Water-like liquid)
+    // 说明：算法内部相序并不要求固定，但测试与输出更希望保持稳定顺序，
+    // 否则会造成“油/水相对调”的观感，并可能影响外部调用。
+    if (res.success && res.n_phase.size() == sys.phases.size()) {
+        std::vector<int> flags;
+        flags.reserve(sys.phases.size());
+        for (const auto& ph : sys.phases) flags.push_back(ph.state.phaseFlag);
+        const int vap = thermo_.vaporPhaseFlag();
+        const int liq = thermo_.liquidPhaseFlag();
+        const int water_idx = find_water_index(thermo_, input.feedMoles.size());
+        reorder_flash_result(res, flags, vap, liq, water_idx);
+    }
+
+    return res;
 }
 
-MultiFlashResult RandFlash::solveMultiPhase(
+// ----------------------------------------------------------------------------------
+// 通用接口：自动相稳定性分析 -> 自动相数选择 -> 自动初始化 -> 相分裂
+// ----------------------------------------------------------------------------------
+MultiFlashResult RandFlash::solve(
     const FlashInput& input,
     const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<std::vector<double>>& initialPhaseCompositions,
     int maxIter,
     double tol)
 {
-  // 目前：如果用户没给初值，就默认 2 相；
-  // 如果给了，就用给的相数；但核心仍只接受 2 相。
-  int F = initialPhaseCompositions.empty()
-        ? 2
-        : static_cast<int>(initialPhaseCompositions.size());
+    // 若用户给了初值，则按给定相数直接求解（相标志保持默认：0 为气相，其余为液相）
+    if (!initialPhaseCompositions.empty()) {
+        const int F = static_cast<int>(initialPhaseCompositions.size());
+        return solveMultiPhaseCore(input, F, elementMatrix, initialPhaseCompositions, {}, maxIter, tol);
+    }
 
-  return solveMultiPhaseCore(
-      input,
-      F,
-      elementMatrix,
-      initialPhaseCompositions,
-      maxIter,
-      tol);
+    // 1) 相稳定性分析
+    phase_stability::PhaseStabilityAnalyzer analyzer(thermo_);
+    phase_stability::StabilityOptions opt;
+    opt.verbose = false;
+
+    auto stab = analyzer.analyze(input.temperature, input.pressure, input.feedMoles, opt);
+
+    // 2) 单相稳定：直接返回（不进入 Rand 迭代）
+    if (stab.stable) {
+        MultiFlashResult result;
+        result.success = true;
+        result.iterations = 0;
+        result.pressure = input.pressure;
+        result.temperature = input.temperature;
+        result.feedComposition = input.feedMoles;
+
+        const double tot = std::accumulate(input.feedMoles.begin(), input.feedMoles.end(), 0.0);
+        result.n_phase = {input.feedMoles};
+        result.beta = {tot};
+        result.mu_infinity_norm = 0.0;
+        result.elem_residual_inf = 0.0;
+        return result;
+    }
+
+    // 3) 根据稳定性结果选择相数与相类型。
+    // 关键约束：对“典型 VLE”体系（一个气相+一个液相）
+    // 稳定性分析可能同时给出 vap 和 liq 的 incipient（数值噪声 / seed 多样性导致），
+    // 但这不应被直接解释为 3 相。3 相仅在“需要两套液相”（LLE/LLV）时启用。
+
+    auto normalize = [&](const std::vector<double>& v) {
+        std::vector<double> x = v;
+        for (double& xi : x) xi = std::max(xi, 1e-14);
+        double s = std::accumulate(x.begin(), x.end(), 0.0);
+        if (s <= 0.0) {
+            const double uni = 1.0 / static_cast<double>(x.size());
+            std::fill(x.begin(), x.end(), uni);
+        } else {
+            for (double& xi : x) xi /= s;
+        }
+        return x;
+    };
+
+    const int vap = thermo_.vaporPhaseFlag();
+    const int liq = thermo_.liquidPhaseFlag();
+
+    // Wilson K (用于在 stability 未给出某类 incipient 时构造更“有偏”的相组成初猜)
+    std::vector<double> K(input.feedMoles.size(), 1.0);
+    try {
+        thermo_.wilsonK(input.temperature, input.pressure, K);
+        for (double& Ki : K) Ki = std::clamp(Ki, 1e-12, 1e12);
+    } catch (...) {
+        // fallback: keep K=1
+    }
+
+    auto build_wilson_guess = [&](bool vapor_like) {
+        std::vector<double> x = input.feedMoles;
+        const double s = std::accumulate(x.begin(), x.end(), 0.0);
+        if (s > 0.0) {
+            for (double& xi : x) xi /= s;
+        }
+        for (size_t i = 0; i < x.size(); ++i) {
+            x[i] = vapor_like ? (x[i] * K[i]) : (x[i] / K[i]);
+        }
+        return normalize(x);
+    };
+
+    // 探测是否含水（用于 LLV：水/油两液相）
+    int water_idx = -1;
+    {
+        const auto names = thermo_.getComponentNames();
+        for (size_t i = 0; i < std::min(names.size(), input.feedMoles.size()); ++i) {
+            std::string n = names[i];
+            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+            if (n == "H2O" || n == "WATER" || n.find("H2O") != std::string::npos) {
+                water_idx = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    const double ztot = std::accumulate(input.feedMoles.begin(), input.feedMoles.end(), 0.0);
+    const double z_water = (water_idx >= 0 && ztot > 0.0) ? (input.feedMoles[water_idx] / ztot) : 0.0;
+    const bool has_water = (water_idx >= 0 && z_water > 1e-6);
+
+    // 收集 incipient：最多 2 个
+    std::vector<std::vector<double>> liquid_cands;
+    std::vector<std::vector<double>> vapor_cands;
+    for (const auto& inc : stab.incipient) {
+        if (inc.phase_flag == liq) liquid_cands.push_back(inc.x);
+        if (inc.phase_flag == vap) vapor_cands.push_back(inc.x);
+    }
+
+    // 默认：先做 2 相（最不容易引入回归）
+    // VLE: {VAP, LIQ}
+    // LLE: {LIQ, LIQ}
+    // LLV: {VAP, LIQ, LIQ}
+
+    // --- 2 相初猜 ---
+    std::vector<std::vector<double>> comps2;
+    std::vector<int> flags2;
+    comps2.reserve(2);
+    flags2.reserve(2);
+
+    // vapor guess
+    std::vector<double> xV = (!vapor_cands.empty()) ? vapor_cands.front() : build_wilson_guess(true);
+    // liquid guess
+    std::vector<double> xL = (!liquid_cands.empty()) ? liquid_cands.front() : build_wilson_guess(false);
+
+    // 若 reference 是 vapor 或 liquid，则更倾向于把 z 放在对应相上（更稳健）
+    if (stab.reference_phase_flag == vap) xV = normalize(input.feedMoles);
+    if (stab.reference_phase_flag == liq) xL = normalize(input.feedMoles);
+
+    // 判断是否更像 LLE（两套 liquid），仅当 stability 明确给出 >=2 个 liquid candidate
+    const bool want_LLE = (liquid_cands.size() >= 2) && (vapor_cands.empty()) && !has_water;
+
+    if (want_LLE) {
+        comps2 = { liquid_cands[0], liquid_cands[1] };
+        flags2 = { liq, liq };
+    } else {
+        comps2 = { xV, xL };
+        flags2 = { vap, liq };
+    }
+
+    // --- 3 相判别（仅当确实需要两套 liquid 时才启用）---
+    // 1) 水体系：优先尝试 LLV
+    // 2) 非水体系：只有在 liquid candidate >= 2 时才尝试 LLV
+    const bool want_LLV = has_water || (liquid_cands.size() >= 2);
+
+    if (want_LLV && !want_LLE) {
+        // 3 相初值：优先来自稳定性结果；不够则用通用 3 相初始化补齐
+        SystemContext sys0;
+        sys0.temperature = input.temperature;
+        sys0.pressure = input.pressure;
+        sys0.feedMoles = input.feedMoles;
+        sys0.elementMatrix = elementMatrix;
+
+        std::vector<std::vector<double>> comps3;
+        std::vector<int> flags3 = {vap, liq, liq};
+
+        // vapor
+        if (!vapor_cands.empty()) comps3.push_back(vapor_cands.front());
+        else comps3.push_back(build_wilson_guess(true));
+
+        // two liquids
+        if (liquid_cands.size() >= 2) {
+            comps3.push_back(liquid_cands[0]);
+            comps3.push_back(liquid_cands[1]);
+        } else {
+            // 用 Generic 初始化构造两套液相种子（尤其对含水体系更稳健）
+            auto init3 = initializeThreePhaseGeneric(sys0);
+            // init3.compositions 是 {V, L1, L2}
+            comps3 = init3.compositions;
+        }
+
+        auto res3 = solveMultiPhaseCore(input, 3, elementMatrix, comps3, flags3, maxIter, tol);
+        if (res3.success) return res3;
+        // 3 相失败时回退 2 相
+    }
+
+    return solveMultiPhaseCore(input, 2, elementMatrix, comps2, flags2, maxIter, tol);
+}
+
+MultiFlashResult RandFlash::solveMultiPhase(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& initialPhaseCompositions,
+    const std::vector<int>& initialPhaseFlags,
+    int maxIter,
+    double tol)
+{
+  // 兼容旧接口：若用户显式给了相组成，则按给定相数求解；否则走“自动相稳定性分析”。
+  if (!initialPhaseCompositions.empty()) {
+    const int F = static_cast<int>(initialPhaseCompositions.size());
+    return solveMultiPhaseCore(
+        input,
+        F,
+        elementMatrix,
+        initialPhaseCompositions,
+        initialPhaseFlags,
+        maxIter,
+        tol);
+  }
+
+  return solve(input, elementMatrix, {}, maxIter, tol);
 }
 
 MultiFlashResult RandFlash::solveGeneral(
@@ -403,11 +803,11 @@ MultiFlashResult RandFlash::solveGeneral(
             for(size_t j=0; j<F; ++j) {
                 updatePhaseChemistry(sys.phases[j]);
                 
-                // 【核心修复】提高特征值下限阈值
-                // 1e-10 -> 1e-3
-                // 这限制了不稳定相的修正步长幅度，防止产生过大的 delta_n 导致 alpha 过小
                 PhaseFixOptions pfx;
-                pfx.eig_floor = 1e-3; 
+                // 说明：这里不应把 eig_floor 设得过大（例如 1e-3），否则会过度“钝化”真实的曲率信息，
+                // 导致步长被压得很小、迭代次数增加，甚至破坏原本可收敛的两相工况。
+                // 维持与两相版本一致的默认量级，并让 line-search 决定实际步长。
+                pfx.eig_floor = 1e-10;
                 pfx.inv_tol   = 1e-12;
                 
                 fixPhaseHessian(sys.phases[j], pfx);

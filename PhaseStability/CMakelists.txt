@@ -1,0 +1,24 @@
+# PhaseStability 层：相稳定性分析（Michelsen TPD 稳定性测试）
+
+file(GLOB PHASE_STABILITY_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+)
+file(GLOB PHASE_STABILITY_HEADERS
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+)
+
+add_library(phase_stability STATIC
+    ${PHASE_STABILITY_SOURCES}
+    ${PHASE_STABILITY_HEADERS}
+)
+
+target_include_directories(phase_stability
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(phase_stability
+    PUBLIC
+      thermo
+)

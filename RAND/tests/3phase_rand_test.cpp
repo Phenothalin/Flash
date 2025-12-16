@@ -80,7 +80,7 @@ int main() {
     auto res = flash.solveMultiPhase(
       input,
       elementMatrix,
-      initialComps, // 传入显式初值
+      {}, // 传入显式初值
       maxIter,
       tol
     );

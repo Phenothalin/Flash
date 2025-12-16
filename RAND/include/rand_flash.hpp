@@ -82,6 +82,15 @@ public:
   RandFlash(thermo::IThermoBackend& thermo,
     ls::LinearSolverInterface& linearSolver);
 
+  // === 通用接口：自动相稳定性判别 + 初始化 + 相分裂 ===
+  // 若 initialPhaseCompositions 非空，则跳过相稳定性分析，按用户给定相数求解。
+  MultiFlashResult solve(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+
   // 保持旧接口用于兼容性测试
   FlashResult solveTwoPhase(
     const FlashInput& input,
@@ -96,15 +105,42 @@ public:
     int nPhases,
     const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+    const std::vector<int>& initialPhaseFlags = {},
     int maxIterations = 50,
     double tolerance = 1e-8);
+
+  // 兼容旧参数顺序（不带 initialPhaseFlags）
+  MultiFlashResult solveMultiPhaseCore(
+    const FlashInput& input,
+    int nPhases,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& initialPhaseCompositions,
+    int maxIterations,
+    double tolerance)
+  {
+    return solveMultiPhaseCore(input, nPhases, elementMatrix, initialPhaseCompositions,
+                               std::vector<int>{}, maxIterations, tolerance);
+  }
 
   MultiFlashResult solveMultiPhase(
     const FlashInput& input,
     const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+    const std::vector<int>& initialPhaseFlags = {},
     int maxIterations = 50,
     double tolerance = 1e-8);  
+
+  // 兼容旧参数顺序（不带 initialPhaseFlags）
+  MultiFlashResult solveMultiPhase(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& initialPhaseCompositions,
+    int maxIterations,
+    double tolerance)
+  {
+    return solveMultiPhase(input, elementMatrix, initialPhaseCompositions,
+                           std::vector<int>{}, maxIterations, tolerance);
+  }
       
   struct ConvergenceInfo {
     double max_mu_diff;   
@@ -148,6 +184,19 @@ private:
   InitResult initializeThreePhaseWater(
     const SystemContext& sys, 
     double margin = 1e-10) const;
+
+  // 通用三相初始化：不假设必须含水
+  InitResult initializeThreePhaseGeneric(
+    const SystemContext& sys,
+    double margin = 1e-10) const;
+
+  // 用“相组成猜测”构造满足守恒的初始 n（最小二乘 beta + 行缩放严格守恒）
+  InitResult initializeFromCompositions(
+    const SystemContext& sys,
+    int nPhases,
+    const std::vector<std::vector<double>>& phaseCompositions,
+    const std::vector<int>& phaseFlags,
+    double min_phase_moles_ratio = 1e-8) const;
 
   // === 【修改 1】通用化 LineSearch ===
   double lineSearch(

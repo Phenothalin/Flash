@@ -44,5 +44,7 @@ option(BUILD_TP_SANITY_TEST "Build ThermoPack sanity check test" ON)
 
 # ===================== 子目录 =====================
 add_subdirectory(Thermo)
+# 相稳定性分析（独立模块，可被 RAND 或其他模块复用）
+add_subdirectory(PhaseStability)
 # add_subdirectory(RR)
 add_subdirectory(RAND)

@@ -25,8 +25,8 @@ target_include_directories(randflash
 target_link_libraries(randflash
     PUBLIC
       thermo
+      phase_stability
       Eigen3::Eigen
-      GTest::gtest
 )
 
 # ===================== RAND 测试 =====================
@@ -76,17 +76,3 @@ target_link_libraries(3phase_rand_test
     PRIVATE
       randflash
 )
-# add_executable(rand_flash_test
-#     tests/rand_flash_test.cpp
-# )
-
-# target_include_directories(rand_flash_test
-#     PRIVATE
-#       ${CMAKE_CURRENT_SOURCE_DIR}/include
-#       ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-# )
-
-# target_link_libraries(rand_flash_test
-#     PRIVATE
-#       randflash
-# )

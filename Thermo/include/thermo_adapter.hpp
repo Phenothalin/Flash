@@ -124,7 +124,7 @@ public:
     // for(size_t i = 0; i < lnphi.size() ; ++i){
     //   std::cout<<lnphi[i]<<"  ";
     // }
-    std::cout<<std::endl;
+    // NOTE: avoid spamming stdout in tight loops
     // 2) μ = RT * ( ln f = lnφ + ln x + ln p )
     std::vector<double> muRT(lnphi.size());
     const double lnP = std::log(P);
