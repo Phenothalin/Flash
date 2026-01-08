@@ -63,6 +63,8 @@ public:
     if (std::abs(s - 1.0) > 1e-8) {
       x = normalize_n(x_or_n).first;
     }
+    /* dlnfugdn在∑n = const这一约束下数值等价于dlnfugdx(易推导)
+    因此后续构建的dmudn、m矩阵都是在∑n = const的约束下的（等价于gibbs-duhem约束）*/
     auto prop = eos_.thermo(T, P, x, phase, /*dlnfugdt*/false,
                                       /*dlnfugdp*/false,
                                       /*dlnfugdn*/true);

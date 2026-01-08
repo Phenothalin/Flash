@@ -168,6 +168,28 @@ TEST_F(MultiSystemFlashTest, Original_11_Comps) {
     RunSystemTest(comps, T, P, z, "Original_Complex_Mix");
 }
 
+//LLE TEST
+TEST_F(MultiSystemFlashTest, LLE_Water_Hexane) {
+
+    // 典型的液液分层体系：水 + 正己烷
+    // H2O (极性) 和 nC6 (非极性) 在常温下互不相溶
+    std::string comps = "H2O,nC6";
+
+    // 温度 298.15 K (25°C)
+    double T = 298.15;
+
+    // 压力 1 atm (1.01325 bar)，确保在液相区
+    double P = 1.01325e5;
+
+    // 摩尔组分：50% 水，50% 正己烷
+    // 这种配比将导致明显的两相分裂（富水相 和 富油相）
+    std::vector<double> z = {
+        0.5, 0.5
+    };
+
+    RunSystemTest(comps, T, P, z, "LLE_Water_Hexane_Mix");
+}
+
 // main 函数
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

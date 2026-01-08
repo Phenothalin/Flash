@@ -26,7 +26,7 @@ int main(){
   std::vector<double> z_normalized_sum = {0.0911577, 0.0136737, 0.501367, 0.127621, 0.109389, 0.0455788, 0.0410209, 0.0273473, 0.0227894, 0.0109389, 0.00911577};
   // 2) 条件与组成
   const double T = 295.0;            // K
-  const double p = 2e6;            // Pa
+  const double p = 101325;            // Pa
   std::vector<double> z = {0.5,0.5};
   std::vector<double> x0 = normalize(z);
 
@@ -48,7 +48,8 @@ int main(){
   std::cout << "Z_vap = " << z_vap.value()
             << ", Z_liq = " << z_liq.value() << std::endl;
   
-  auto FlashResult = eos2.two_phase_tpflash(295, 2e6, z_normalized_sum);
+  auto FlashResult2 = eos2.two_phase_tpflash(295, 2e6, z_normalized_sum);
+  auto FlashResult = eos.two_phase_tpflash(295, 101325, z);
   std::cout << "Vapor fraction: " << FlashResult.betaV << std::endl;
   std::cout << "Liquid composition: ";
   for (const double& xi : FlashResult.x) std::cout << xi << " ";
