@@ -13,11 +13,14 @@ struct StabilityOptions {
   double tpd_tol = 1e-12;          // 判定不稳定阈值：TPD < -tpd_tol
   double comp_floor = 1e-14;       // 组成下限（避免 ln(0)）
   double distinct_l1 = 1e-2;       // 判定两个解“不同”的 L1 距离阈值
+  int max_incipient = 4;        // 最多保留的 incipient 数量（用于 LLV/LLE 初始化）
+  bool dual_reference = true;   // 同时以 V-like 与 L-like 作为参考相做稳定性分析
   bool verbose = false;
 };
 
 struct IncipientPhase {
   int phase_flag = 0;              // thermo backend phaseFlag
+  int reference_phase_flag = 0;    // 本次 TPD/切平面所使用的参考相 phaseFlag
   std::vector<double> x;           // trial phase composition (mole fraction)
   double tpd = 0.0;                // tangent plane distance at optimum
   int iters = 0;

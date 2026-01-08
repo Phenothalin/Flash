@@ -1,10 +1,12 @@
 # RAND 层：RandFlash 多组分两相/多相闪蒸
 
-file(GLOB RAND_SOURCES
-     "${CMAKE_CURRENT_SOURCE_DIR}/src/eigen.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/rand_flash.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/rand_multiphase.cpp"
+set(RAND_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/eigen.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_flash.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_init.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_solver.cpp
 )
+
 file(GLOB RAND_HEADERS
      "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"

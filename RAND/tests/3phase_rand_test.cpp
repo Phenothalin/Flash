@@ -77,10 +77,10 @@ int main() {
     int    maxIter = 30;
     double tol     = 1e-8;
 
-    auto res = flash.solveMultiPhase(
+    auto res = flash.solve(
       input,
       elementMatrix,
-      {}, // 传入显式初值
+      {},
       maxIter,
       tol
     );

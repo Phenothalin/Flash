@@ -66,7 +66,7 @@ protected:
         int maxIter = 30;
         double tol = 1e-8;
 
-        auto res = flash.solveMultiPhase(input, elementMatrix, {}, maxIter, tol);
+        auto res = flash.solve(input, elementMatrix, {}, maxIter, tol);
         if(res.success){
             flash.printResult(res);
         }

@@ -99,48 +99,11 @@ public:
     const std::vector<double>& initialLiquidComposition = {},
     int maxIterations = 50,
     double tolerance = 1e-8);
-      
-  MultiFlashResult solveMultiPhaseCore(
-    const FlashInput& input,
-    int nPhases,
-    const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& initialPhaseCompositions = {},
-    const std::vector<int>& initialPhaseFlags = {},
-    int maxIterations = 50,
-    double tolerance = 1e-8);
 
-  // 兼容旧参数顺序（不带 initialPhaseFlags）
-  MultiFlashResult solveMultiPhaseCore(
-    const FlashInput& input,
-    int nPhases,
-    const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& initialPhaseCompositions,
-    int maxIterations,
-    double tolerance)
-  {
-    return solveMultiPhaseCore(input, nPhases, elementMatrix, initialPhaseCompositions,
-                               std::vector<int>{}, maxIterations, tolerance);
-  }
-
-  MultiFlashResult solveMultiPhase(
-    const FlashInput& input,
-    const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& initialPhaseCompositions = {},
-    const std::vector<int>& initialPhaseFlags = {},
-    int maxIterations = 50,
-    double tolerance = 1e-8);  
-
-  // 兼容旧参数顺序（不带 initialPhaseFlags）
-  MultiFlashResult solveMultiPhase(
-    const FlashInput& input,
-    const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& initialPhaseCompositions,
-    int maxIterations,
-    double tolerance)
-  {
-    return solveMultiPhase(input, elementMatrix, initialPhaseCompositions,
-                           std::vector<int>{}, maxIterations, tolerance);
-  }
+  // 注意：v5 起不再暴露 solveMultiPhase / solveMultiPhaseCore。
+  // 统一通过 solve() 使用：
+  // - 不提供 initialPhaseCompositions：内部做相稳定性分析 + 自动选相数/相型
+  // - 提供 initialPhaseCompositions：按给定相数组合做初始化并求解
       
   struct ConvergenceInfo {
     double max_mu_diff;   
@@ -243,9 +206,18 @@ private:
     const std::vector<double>& feedComposition) const;
 
   // === 【新增】通用求解内核 ===
-  // 所有的 Newton 迭代逻辑移到这里，solveTwoPhase 和 solveMultiPhaseCore 只是它的包装
+  // 所有的 Newton 迭代逻辑移到这里；solve() / solveTwoPhase() 只是包装。
   MultiFlashResult solveGeneral(
     SystemContext& sys,
+    int maxIterations,
+    double tolerance);
+
+  // === 内部驱动：给定相数组合猜测 + 相型，完成初始化 + solveGeneral + 结果相序稳定化 ===
+  MultiFlashResult solveWithPhaseGuesses(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<std::vector<double>>& phaseCompositions,
+    const std::vector<int>& phaseFlags,
     int maxIterations,
     double tolerance);
 };

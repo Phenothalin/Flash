@@ -289,173 +289,20 @@ RandFlash::RandFlash(thermo::IThermoBackend& thermo,
   // 如果有额外初始化,可以放在这里
 }
 
-// ---- in rand_flash.cpp ----
-InitResult RandFlash::initializeTwoPhase(
-  const SystemContext& sys,
-  const std::vector<double>& vaporGuess,
-  const std::vector<double>& liquidGuess,
-  double margin) const
-{
-  const size_t C = sys.feedMoles.size();
-  auto sum = [](const std::vector<double>& v){ return std::accumulate(v.begin(), v.end(), 0.0); };
-  const double Ftot = sum(sys.feedMoles);
-  if (Ftot <= 0.0) throw std::invalid_argument("Feed total must be positive");
 
-  // 本地辅助：归一化
-  auto normalized = [](std::vector<double> v){
-    double s = std::accumulate(v.begin(), v.end(), 0.0);
-    if (!(s > 0.0)) throw std::invalid_argument("Composition sum must be positive");
-    for (double &xi : v) if (xi < 0.0) xi = 0.0;
-    double s2 = std::accumulate(v.begin(), v.end(), 0.0);
-    for (double &x : v) x /= (s2 > 0.0 ? s2 : 1.0);
-    return v;
-  };
-
-  // 进料分率 z
-  std::vector<double> z(C);
-  for (size_t i=0;i<C;++i) z[i] = sys.feedMoles[i] / Ftot;
-
-  // 准备通用输出结构：固定为2相
-  InitResult out;
-  out.n_phases.resize(2);       // index 0: Vapor, 1: Liquid
-  out.beta.resize(2);
-  out.compositions.resize(2);
-
-  // 使用本地变量暂存计算结果，最后填入 out
-  std::vector<double> y(C, 0.0), x(C, 0.0); // y=vapor, x=liquid
-  double betaV = 0.0;
-
-  const double eps = 1e-14;
-  const double Fmin = eps, Fmax = Ftot * (1.0 - margin);
-
-  // CASE A：只给了气相组成 y
-  if (!vaporGuess.empty() && liquidGuess.empty()) {
-    y = normalized(vaporGuess);
-
-    double ub = Fmax;
-    for (size_t i=0;i<C;++i) {
-      if (y[i] > eps) ub = std::min(ub, sys.feedMoles[i] / y[i]);
-    }
-    ub = std::max(ub, Fmin);
-    betaV = std::min(0.5*Ftot, ub*(1.0 - margin));
-
-    const double Ltot = Ftot - betaV;
-    if (Ltot <= Ftot*margin) betaV = Ftot*(1.0 - margin);
-    
-    for (size_t i=0;i<C;++i) {
-      x[i] = (sys.feedMoles[i] - betaV*y[i]) / (Ftot - betaV);
-      if (x[i] < 0.0) x[i] = 0.0;
-    }
-    x = normalized(x);
-  }
-  // CASE B：只给了液相组成 x
-  else if (vaporGuess.empty() && !liquidGuess.empty()) {
-    x = normalized(liquidGuess);
-
-    double lb = Fmin;
-    for (size_t i=0;i<C;++i) {
-      if (x[i] > eps) lb = std::max(lb, Ftot - sys.feedMoles[i]/x[i]);
-    }
-    lb = std::max(lb, Fmin);
-    betaV = std::max(0.5*Ftot, lb*(1.0 + margin));
-    if (betaV >= Fmax) betaV = 0.5*(lb + Fmax);
-
-    for (size_t i=0;i<C;++i) {
-      y[i] = (sys.feedMoles[i] - (Ftot - betaV)*x[i]) / betaV;
-      if (y[i] < 0.0) y[i] = 0.0;
-    }
-    y = normalized(y);
-  }
-  // CASE C：同时给了 y 与 x
-  else if (!vaporGuess.empty() && !liquidGuess.empty()) {
-    y = normalized(vaporGuess);
-    x = normalized(liquidGuess);
-
-    double num = 0.0, den = 0.0;
-    for (size_t i=0;i<C;++i) {
-      const double d = y[i] - x[i];
-      num += d * (z[i] - x[i]);
-      den += d * d;
-    }
-    betaV = (den > 0.0) ? Ftot * (num / den) : 0.5*Ftot;
-
-    double ub = Fmax, lb = Fmin;
-    for (size_t i=0;i<C;++i) {
-      if (y[i] > eps) ub = std::min(ub, sys.feedMoles[i] / y[i]);
-      if (x[i] > eps) lb = std::max(lb, Ftot - sys.feedMoles[i]/x[i]);
-    }
-    betaV = std::min(std::max(betaV, lb*(1.0 + margin)), ub*(1.0 - margin));
-  }
-  // CASE D：都没给 -> Wilson K
-  else {
-    std::vector<double> K(C, 0.0);
-    // 这里要注意：如果 initializeTwoPhase 被用于非 0/1 相的情况，逻辑需调整
-    // 但目前它是专门给 solveTwoPhase 用的
-    thermo_.wilsonK(sys.temperature, sys.pressure, K);
-
-    auto rr = [&](double b) {
-      double s = 0.0;
-      for (size_t i = 0; i < C; ++i) {
-        double denom = 1.0 + b * (K[i] - 1.0);
-        if (denom < 1e-12) denom = 1e-12;
-        s += z[i] * (K[i] - 1.0) / denom;
-      }
-      return s;
-    };
-
-    // 简单的 Rachford-Rice 找 beta (0~1)
-    double b_lo = margin, b_hi = 1.0 - margin;
-    double f_lo = rr(b_lo), f_hi = rr(b_hi);
-    double b_frac = 0.5;
-
-    if (f_lo * f_hi < 0.0) {
-      for (int it = 0; it < 40; ++it) {
-        b_frac = 0.5 * (b_lo + b_hi);
-        double f = rr(b_frac);
-        if (std::fabs(f) < 1e-12) break;
-        if (f * f_lo > 0.0) { b_lo = b_frac; f_lo = f; } 
-        else { b_hi = b_frac; f_hi = f; }
-      }
-    }
-
-    betaV = b_frac * Ftot;
-
-    for (size_t i = 0; i < C; ++i) {
-      double denom = 1.0 + b_frac * (K[i] - 1.0);
-      if (denom < 1e-12) denom = 1e-12;
-      x[i] = z[i] / denom;
-      y[i] = K[i] * x[i];
-    }
-    x = normalized(x);
-    y = normalized(y);
-  }
-
-  // 填回通用结构
-  double betaL = Ftot - betaV;
-  
-  out.beta[0] = betaV;
-  out.beta[1] = betaL;
-  
-  out.compositions[0] = y;
-  out.compositions[1] = x;
-
-  out.n_phases[0].resize(C);
-  out.n_phases[1].resize(C);
-  for (size_t i=0; i<C; ++i) {
-    out.n_phases[0][i] = betaV * y[i];
-    out.n_phases[1][i] = betaL * x[i];
-  }
-
-  return out;
-}
 
 // 1) 局部 Jacobian 构造：对应论文式 (4.11)-(4.14)
 void RandFlash::updatePhaseChemistry(PhaseContext& phaseCtx)
 {
   // 1) 复制一份状态以便安全裁剪 n_i（避免零 / 负数）
+  // 说明：这里的裁剪仅用于热力学性质求值（避免 log(0) / 导数异常），并会写回 state。
+  // 绝对阈值过大时会在“濒死相(beta→0)”场景把组成推向近似均匀，进而破坏收敛与线搜索。
+  // 因此采用与相总摩尔数 beta 成比例的裁剪阈值：ni >= max(1e-20, 1e-12 * beta)。
   thermo::PhaseState st = phaseCtx.state;
+  const double beta0 = std::accumulate(st.moleNumbers.begin(), st.moleNumbers.end(), 0.0);
+  const double clip  = std::max(1e-20, 1e-12 * std::max(beta0, 0.0));
   for (double& ni : st.moleNumbers) {
-    if (ni <= 1e-10) ni = 1e-10;
+    if (ni <= clip) ni = clip;
   }
 
   const size_t C = st.moleNumbers.size();

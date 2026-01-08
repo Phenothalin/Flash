@@ -47,7 +47,7 @@ int main() {
     int    maxIter = 20;
     double tol     = 1e-8;
 
-    auto res = flash.solveMultiPhase(
+    auto res = flash.solve(
       input,
       elementMatrix,
       {},

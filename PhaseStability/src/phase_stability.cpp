@@ -195,64 +195,87 @@ StabilityResult PhaseStabilityAnalyzer::analyze(double T, double P, const std::v
   StabilityResult out;
   if (z.empty()) return out;
 
+  const int vaporFlag  = thermo_.vaporPhaseFlag();
+  const int liquidFlag = thermo_.liquidPhaseFlag();
+
+  // Normalize z (accepts mole numbers or mole fractions)
   const std::vector<double> z_norm = normalize_positive(z, opt.comp_floor);
 
-  // Choose reference phase: compare molar Gibbs in vapor vs liquid at same z
-  const int vap = thermo_.vaporPhaseFlag();
-  const int liq = thermo_.liquidPhaseFlag();
+  // Compute V-like and L-like single-phase chemical potentials at z
+  const std::vector<double> mu_v = thermo_.chemicalPotentials(thermo::PhaseState{T, P, z_norm, vaporFlag});
+  const std::vector<double> mu_l = thermo_.chemicalPotentials(thermo::PhaseState{T, P, z_norm, liquidFlag});
 
-  const std::vector<double> mu_v = thermo_.chemicalPotentials(thermo::PhaseState{T, P, z_norm, vap});
-  const std::vector<double> mu_l = thermo_.chemicalPotentials(thermo::PhaseState{T, P, z_norm, liq});
   const double g_v = molar_gibbs(z_norm, mu_v);
   const double g_l = molar_gibbs(z_norm, mu_l);
 
-  int ref_flag = (g_l <= g_v) ? liq : vap;
-  out.reference_phase_flag = ref_flag;
+  // For reporting only: choose the lower-Gibbs single-phase branch as reference.
+  const int report_ref = (g_l <= g_v) ? liquidFlag : vaporFlag;
+  out.reference_phase_flag = report_ref;
   out.g_ref = (g_l <= g_v) ? g_l : g_v;
 
-  const std::vector<double> mu_ref = (ref_flag == liq) ? mu_l : mu_v;
-  const std::vector<double> lnphi_z = lnphi_from_mu(T, P, z_norm, mu_ref);
-
-  struct Candidate {
+  struct Cand {
     int phase_flag;
+    int ref_flag;
     std::vector<double> x;
     double tpd;
     int iters;
   };
-  std::vector<Candidate> cands;
 
-  auto try_phase = [&](int trial_flag) {
-    auto seeds = build_seeds(T, P, z_norm, trial_flag, opt);
-    for (auto w0 : seeds) {
-      std::vector<double> w = normalize_positive(w0, opt.comp_floor);
-      int iters = 0;
-      std::vector<double> lnphi_w;
-      successive_substitution(T, P, z_norm, lnphi_z, trial_flag, w, iters, opt, &lnphi_w);
+  std::vector<Cand> all;
 
-      // Compute TPD at w
-      double tpd = 0.0;
-      for (size_t i = 0; i < w.size(); ++i) {
-        const double wi = std::max(w[i], opt.comp_floor);
-        const double zi = std::max(z_norm[i], opt.comp_floor);
-        tpd += wi * (std::log(wi) + lnphi_w[i] - std::log(zi) - lnphi_z[i]);
+  auto run_with_reference = [&](int ref_flag, const std::vector<double>& mu_ref) {
+    const std::vector<double> lnphi_z_ref = lnphi_from_mu(T, P, z_norm, mu_ref);
+
+    auto try_phase = [&](int trial_phase_flag) {
+      auto seeds = build_seeds(T, P, z_norm, trial_phase_flag, opt);
+      for (auto w0 : seeds) {
+        std::vector<double> w = normalize_positive(w0, opt.comp_floor);
+        int iters = 0;
+        std::vector<double> lnphi_w;
+
+        (void)successive_substitution(
+            T, P, z_norm, lnphi_z_ref, trial_phase_flag,
+            w, iters, opt, &lnphi_w);
+
+        // TPD = Σ w_i [ ln(w_i) + lnphi(w) - ln(z_i) - lnphi_ref(z) ]
+        double tpd = 0.0;
+        for (size_t i = 0; i < w.size(); ++i) {
+          tpd += w[i] * ((std::log(w[i]) + lnphi_w[i])
+                       - (std::log(z_norm[i]) + lnphi_z_ref[i]));
+        }
+
+        if (tpd < -opt.tpd_tol) {
+          all.push_back(Cand{trial_phase_flag, ref_flag, w, tpd, iters});
+        }
       }
+    };
 
-      if (std::isfinite(tpd) && tpd < -opt.tpd_tol) {
-        cands.push_back(Candidate{trial_flag, w, tpd, iters});
-      }
-    }
+    // Try both trial phase types against this reference tangent plane.
+    try_phase(vaporFlag);
+    try_phase(liquidFlag);
   };
 
-  // Test both vapor-like and liquid-like trial phases against the chosen reference tangent plane
-  try_phase(vap);
-  try_phase(liq);
+  if (opt.dual_reference) {
+    run_with_reference(vaporFlag, mu_v);
+    run_with_reference(liquidFlag, mu_l);
+  } else {
+    run_with_reference(report_ref, (report_ref == liquidFlag) ? mu_l : mu_v);
+  }
 
-  // Deduplicate by (phase_flag, composition) L1 distance
-  std::vector<Candidate> uniq;
-  for (const auto& c : cands) {
+  // ------------------------
+  //  Incipient clustering / de-dup
+  // ------------------------
+  std::sort(all.begin(), all.end(), [](const Cand& a, const Cand& b) {
+    return a.tpd < b.tpd;
+  });
+
+  std::vector<Cand> uniq;
+  for (const auto& c : all) {
     bool merged = false;
     for (auto& u : uniq) {
-      if (u.phase_flag == c.phase_flag && l1_dist(u.x, c.x) < opt.distinct_l1) {
+      if (u.phase_flag != c.phase_flag) continue;
+      if (l1_dist(u.x, c.x) < opt.distinct_l1) {
+        // Keep the more negative TPD (stronger instability)
         if (c.tpd < u.tpd) u = c;
         merged = true;
         break;
@@ -261,30 +284,61 @@ StabilityResult PhaseStabilityAnalyzer::analyze(double T, double P, const std::v
     if (!merged) uniq.push_back(c);
   }
 
-  std::sort(uniq.begin(), uniq.end(), [](const Candidate& a, const Candidate& b){
-    return a.tpd < b.tpd;
-  });
-
   out.stable = uniq.empty();
-  out.incipient.clear();
+  if (out.stable) return out;
+
+  // Prefer returning: (V + L) and if possible two distinct liquids (for LLE/LLV init)
+  std::vector<Cand> vap, liq;
   for (const auto& u : uniq) {
-    out.incipient.push_back(IncipientPhase{u.phase_flag, u.x, u.tpd, u.iters});
-    if (out.incipient.size() >= 2) break; // 最多保留两个：用于 3 相初始化
+    if (u.phase_flag == vaporFlag) vap.push_back(u);
+    else liq.push_back(u);
+  }
+  auto sort_tpd = [](const Cand& a, const Cand& b){ return a.tpd < b.tpd; };
+  std::sort(vap.begin(), vap.end(), sort_tpd);
+  std::sort(liq.begin(), liq.end(), sort_tpd);
+
+  std::vector<Cand> selected;
+  if (!vap.empty()) selected.push_back(vap.front());
+  if (!liq.empty()) selected.push_back(liq.front());
+  if (liq.size() >= 2) selected.push_back(liq[1]);
+
+  // Fill remaining by global best TPD, keeping uniqueness in (phase_flag,x)
+  for (const auto& u : uniq) {
+    if (static_cast<int>(selected.size()) >= opt.max_incipient) break;
+    bool exists = false;
+    for (const auto& s : selected) {
+      if (s.phase_flag == u.phase_flag && l1_dist(s.x, u.x) < opt.distinct_l1) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists) selected.push_back(u);
+  }
+
+  if (static_cast<int>(selected.size()) > opt.max_incipient) {
+    selected.resize(static_cast<size_t>(opt.max_incipient));
+  }
+
+  out.incipient.reserve(selected.size());
+  for (const auto& s : selected) {
+    IncipientPhase ip;
+    ip.phase_flag = s.phase_flag;
+    ip.reference_phase_flag = s.ref_flag;
+    ip.x = s.x;
+    ip.tpd = s.tpd;
+    ip.iters = s.iters;
+    out.incipient.push_back(std::move(ip));
   }
 
   if (opt.verbose) {
-    std::cout << "[PhaseStability] ref=" << (ref_flag == liq ? "LIQ" : "VAP")
-              << " g_ref=" << out.g_ref
-              << " stable=" << out.stable
-              << " n_incipient=" << out.incipient.size() << "\n";
-    for (size_t k = 0; k < out.incipient.size(); ++k) {
-      std::cout << "  cand[" << k << "] flag="
-                << (out.incipient[k].phase_flag == liq ? "LIQ" : "VAP")
-                << " tpd=" << out.incipient[k].tpd << "\n";
-    }
+    std::cout << "[Stability] g_v=" << g_v << " g_l=" << g_l
+              << " report_ref=" << out.reference_phase_flag
+              << " unstable_candidates=" << uniq.size()
+              << " returned=" << out.incipient.size() << "\n";
   }
 
   return out;
+
 }
 
 } // namespace phase_stability
