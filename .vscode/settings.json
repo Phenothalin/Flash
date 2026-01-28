@@ -8,7 +8,10 @@
     //   },
     //   "cmake.buildEnvironment": {
     //     "DYLD_LIBRARY_PATH": "/Users/madao/code/thermopack/installed"
-    //   },    
+    //   },   
+    "cmake.configureSettings": {
+        "THERMOPACK_DIR": "/Users/chaochao/Code/thermopack"
+      },
     "files.associations": {
         "cmath": "cpp",
         "limits": "cpp",

@@ -21,6 +21,32 @@ struct FlashInput {
   std::vector<double> feedMoles;  // size C
 };
 
+// 控制 solve() 行为的选项。
+//
+// 设计目标：
+// 1) 默认保持现有行为：enable_stability_test=true 且不提供初值时自动做 stability analysis。
+// 2) 允许关闭 stability analysis，并强制指定相数（reaction 体系常见：固定相数后在元素守恒约束下做 Gibbs 最小化）。
+// 3) 允许用户给定初始相组成（此时无论 enable_stability_test 与否，均跳过 stability analysis）。
+struct SolveOptions {
+  // 是否启用相稳定性分析。
+  // - true ：若未提供 initial_phase_compositions，则走原自动流程。
+  // - false：若未提供 initial_phase_compositions，则必须提供 forced_phase_count。
+  bool enable_stability_test = true;
+
+  // 当 enable_stability_test=false 且 initial_phase_compositions 为空时，强制相数。
+  // 取值：F>=1。
+  int forced_phase_count = 0;
+
+  // 强制相型（phase flag）。若为空，将默认采用：
+  // - F==1：liquid
+  // - F>=2：第 0 相 vapor，其余 liquid
+  std::vector<int> forced_phase_flags;
+
+  // 初始相组成猜测（每行一个相的组成向量，需归一化或近似归一化）。
+  // 非空时：直接按给定相数求解并跳过 stability analysis。
+  std::vector<std::vector<double>> initial_phase_compositions;
+};
+
 struct PhaseFixOptions {
   double eig_floor     = 1e-10;
   double eps_shift     = 1e-12;
@@ -88,6 +114,18 @@ public:
     const FlashInput& input,
     const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+
+  // 新接口：通过 SolveOptions 控制是否执行 stability analysis / 是否强制相数。
+  // 说明：
+  // - opt.initial_phase_compositions 非空时：直接按给定相数求解（跳过 stability）。
+  // - opt.enable_stability_test=true 且 initial 为空：保持原自动流程。
+  // - opt.enable_stability_test=false 且 initial 为空：必须给 forced_phase_count。
+  MultiFlashResult solve(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
     int maxIterations = 50,
     double tolerance = 1e-8);
 

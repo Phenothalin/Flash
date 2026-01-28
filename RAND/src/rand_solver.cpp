@@ -449,6 +449,159 @@ MultiFlashResult RandFlash::solve(
     return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
 }
 
+// ----------------------------------------------------------------------------------
+// 新接口：SolveOptions
+// - 默认保持原 solve() 行为（enable_stability_test=true 且不提供初猜时：自动 stability analysis）
+// - 支持关闭 stability analysis 并强制相数（reaction 体系常用）
+// ----------------------------------------------------------------------------------
+MultiFlashResult RandFlash::solve(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIter,
+    double tol)
+{
+    const int vap = thermo_.vaporPhaseFlag();
+    const int liq = thermo_.liquidPhaseFlag();
+
+    // 0) 若用户给了初始相组成：直接走给定相数（跳过 stability analysis）
+    if (!opt.initial_phase_compositions.empty()) {
+        const int F = static_cast<int>(opt.initial_phase_compositions.size());
+        std::vector<int> flags;
+        if (!opt.forced_phase_flags.empty()) {
+            if (static_cast<int>(opt.forced_phase_flags.size()) != F) {
+                throw std::invalid_argument("SolveOptions: forced_phase_flags size mismatch");
+            }
+            flags = opt.forced_phase_flags;
+        } else {
+            flags.assign(F, liq);
+            if (F >= 2) flags[0] = vap;
+        }
+        return solveWithPhaseGuesses(input, elementMatrix, opt.initial_phase_compositions, flags, maxIter, tol);
+    }
+
+    // 1) enable_stability_test=true：保持原逻辑
+    if (opt.enable_stability_test) {
+        return this->solve(input, elementMatrix, std::vector<std::vector<double>>{}, maxIter, tol);
+    }
+
+    // 2) enable_stability_test=false：必须强制相数
+    const int F = opt.forced_phase_count;
+    if (F <= 0) {
+        throw std::invalid_argument("SolveOptions: forced_phase_count must be > 0 when enable_stability_test=false and no initial compositions");
+    }
+
+    // 2.1 phase flags
+    std::vector<int> flags;
+    if (!opt.forced_phase_flags.empty()) {
+        if (static_cast<int>(opt.forced_phase_flags.size()) != F) {
+            throw std::invalid_argument("SolveOptions: forced_phase_flags size mismatch");
+        }
+        flags = opt.forced_phase_flags;
+    } else {
+        flags.assign(F, liq);
+        if (F >= 2) flags[0] = vap;
+    }
+
+    // 2.2 helpers
+    auto normalize = [&](const std::vector<double>& v) {
+        std::vector<double> x = v;
+        for (double& xi : x) xi = std::max(xi, 1e-14);
+        double s = std::accumulate(x.begin(), x.end(), 0.0);
+        if (s <= 0.0) {
+            const double uni = 1.0 / static_cast<double>(x.size());
+            std::fill(x.begin(), x.end(), uni);
+        } else {
+            for (double& xi : x) xi /= s;
+        }
+        return x;
+    };
+
+    // Wilson K (用于构造 vapor-like / liquid-like 初猜)
+    std::vector<double> K(input.feedMoles.size(), 1.0);
+    try {
+        thermo_.wilsonK(input.temperature, input.pressure, K);
+        for (double& Ki : K) Ki = std::clamp(Ki, 1e-12, 1e12);
+    } catch (...) {
+        // fallback: keep K=1
+    }
+
+    auto build_wilson_guess = [&](bool vapor_like) {
+        std::vector<double> x = input.feedMoles;
+        const double s = std::accumulate(x.begin(), x.end(), 0.0);
+        if (s > 0.0) {
+            for (double& xi : x) xi /= s;
+        }
+        for (size_t i = 0; i < x.size(); ++i) {
+            x[i] = vapor_like ? (x[i] * K[i]) : (x[i] / K[i]);
+        }
+        return normalize(x);
+    };
+
+    auto perturb = [&](const std::vector<double>& base, int k) {
+        std::vector<double> x = base;
+        // deterministic small perturbation to break symmetry
+        const double eps = 1e-3 * static_cast<double>(k + 1);
+        for (size_t i = 0; i < x.size(); ++i) {
+            const double sgn = (i % 2 == 0) ? 1.0 : -1.0;
+            x[i] = std::max(1e-14, x[i] * (1.0 + eps * sgn));
+        }
+        return normalize(x);
+    };
+
+    const std::vector<double> z = normalize(input.feedMoles);
+    const std::vector<double> xV = build_wilson_guess(true);
+    const std::vector<double> xL = build_wilson_guess(false);
+
+    // 2.3 generate phase composition guesses
+    std::vector<std::vector<double>> comps;
+    comps.reserve(F);
+
+    if (F == 1) {
+        // single-phase: use z as a neutral guess (phase flag decided by user / default)
+        comps.push_back(z);
+    } else if (F == 2) {
+        for (int j = 0; j < F; ++j) {
+            comps.push_back(flags[j] == vap ? xV : xL);
+        }
+    } else {
+        // Use existing 3-phase generic initializer to create {V, L1, L2} seeds.
+        SystemContext sys0;
+        sys0.temperature = input.temperature;
+        sys0.pressure = input.pressure;
+        sys0.feedMoles = input.feedMoles;
+        sys0.elementMatrix = elementMatrix;
+
+        auto init3 = initializeThreePhaseGeneric(sys0);
+        const std::vector<double> seedV  = (init3.compositions.size() >= 1) ? init3.compositions[0] : xV;
+        const std::vector<double> seedL1 = (init3.compositions.size() >= 2) ? init3.compositions[1] : xL;
+        const std::vector<double> seedL2 = (init3.compositions.size() >= 3) ? init3.compositions[2] : xL;
+
+        int vap_used = 0;
+        int liq_used = 0;
+        const int liq_count = static_cast<int>(std::count(flags.begin(), flags.end(), liq));
+
+        for (int j = 0; j < F; ++j) {
+            if (flags[j] == vap) {
+                if (vap_used == 0) comps.push_back(seedV);
+                else comps.push_back(perturb(seedV, vap_used));
+                ++vap_used;
+            } else {
+                if (liq_count >= 2) {
+                    if (liq_used == 0) comps.push_back(seedL1);
+                    else if (liq_used == 1) comps.push_back(seedL2);
+                    else comps.push_back(perturb(seedL2, liq_used - 1));
+                } else {
+                    comps.push_back(xL);
+                }
+                ++liq_used;
+            }
+        }
+    }
+
+    return solveWithPhaseGuesses(input, elementMatrix, comps, flags, maxIter, tol);
+}
+
 MultiFlashResult RandFlash::solveGeneral(
     SystemContext& sys,
     int maxIter,

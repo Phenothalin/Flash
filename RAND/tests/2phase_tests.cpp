@@ -65,8 +65,8 @@ protected:
         // 4. 执行计算
         int maxIter = 30;
         double tol = 1e-8;
-
-        auto res = flash.solve(input, elementMatrix, {}, maxIter, tol);
+        randflash::SolveOptions options;
+        auto res = flash.solve(input, elementMatrix, options, maxIter, tol);
         if(res.success){
             flash.printResult(res);
         }
@@ -193,5 +193,7 @@ TEST_F(MultiSystemFlashTest, LLE_Water_Hexane) {
 // main 函数
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
+
+    ::testing::GTEST_FLAG(filter) = "MultiSystemFlashTest.SourGas_H2S_Mix";
     return RUN_ALL_TESTS();
 }
