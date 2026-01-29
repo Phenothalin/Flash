@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C /Users/madao/code/Flash log --oneline -20)"
+      "Bash(git -C /Users/madao/code/Flash log --oneline -20)",
+      "Bash(find:*)",
+      "Bash(otool:*)",
+      "Bash(make:*)",
+      "Bash(./Thermo/tests/compressibility_factor_test:*)",
+      "Bash(./Thermo/tests/tp_thermo_check:*)",
+      "Bash(/Users/madao/code/Flash/build/Thermo/tp_thermo_check:*)",
+      "Bash(/Users/madao/code/Flash/build/Thermo/compressibility_factor_test:*)",
+      "Bash(/Users/madao/code/Flash/build/RAND/2phase_tests:*)"
     ]
   }
 }

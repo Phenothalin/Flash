@@ -23,12 +23,33 @@ project(Flash LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ===================== ThermoPack =====================
+# ===================== ThermoPack (Embedded) =====================
+add_subdirectory(external/thermopack)
+
 if(DEFINED ENV{THERMOPACK_DIR})
-  list(PREPEND CMAKE_PREFIX_PATH "$ENV{THERMOPACK_DIR}")
+  message(WARNING "THERMOPACK_DIR is set but will be ignored. Using embedded thermopack.")
 endif()
 
-find_package(THERMOPACK CONFIG REQUIRED)
+# RPATH helper function for thermopack
+function(set_thermopack_rpath target_name)
+  if(NOT THERMOPACK_USE_STATIC)
+    if(APPLE)
+      get_target_property(_TP_LIB thermopack IMPORTED_LOCATION)
+      get_filename_component(_TP_LIBDIR "${_TP_LIB}" DIRECTORY)
+      set_target_properties(${target_name} PROPERTIES
+        BUILD_WITH_INSTALL_RPATH ON
+        BUILD_RPATH "${_TP_LIBDIR}"
+        INSTALL_RPATH "${_TP_LIBDIR};@loader_path"
+      )
+    elseif(WIN32)
+      get_target_property(_TP_LIB thermopack IMPORTED_LOCATION)
+      add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_TP_LIB}" $<TARGET_FILE_DIR:${target_name}>
+      )
+    endif()
+  endif()
+endfunction()
 
 find_package(GTest REQUIRED)
 # ===================== Eigen（通过 vcpkg） =====================

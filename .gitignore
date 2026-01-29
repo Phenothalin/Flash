@@ -8,3 +8,10 @@ build/
 /cmake-build/
 /out/
 /dist/
+
+# Track embedded thermopack libraries
+!external/thermopack/lib/**/*.dylib
+!external/thermopack/lib/**/*.a
+!external/thermopack/lib/**/*.so
+!external/thermopack/lib/**/*.dll
+!external/thermopack/lib/**/*.lib

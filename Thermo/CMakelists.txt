@@ -60,6 +60,8 @@ target_link_libraries(compressibility_factor_test
       Eigen3::Eigen
 )
 
+set_thermopack_rpath(compressibility_factor_test)
+
 # 2) ThermoPack sanity check（可开关）
 if(BUILD_TP_SANITY_TEST)
   add_executable(tp_thermo_check
@@ -77,23 +79,6 @@ if(BUILD_TP_SANITY_TEST)
         Eigen3::Eigen
   )
 
-  # macOS 下修 RPATH，方便找到 thermopack 的 dylib
-  if(APPLE)
-    get_target_property(_TP_LIB thermopack LOCATION)
-    get_filename_component(_TP_LIBDIR "${_TP_LIB}" DIRECTORY)
-
-    set_target_properties(tp_thermo_check PROPERTIES
-      BUILD_WITH_INSTALL_RPATH ON
-      BUILD_RPATH "${_TP_LIBDIR}"
-      INSTALL_RPATH "${_TP_LIBDIR};@loader_path"
-    )
-  endif()
-
-  # Windows：把 thermopack DLL 复制到可执行所在目录（如有需要）
-  if(WIN32)
-    add_custom_command(TARGET tp_thermo_check POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              $<TARGET_FILE:thermopack> $<TARGET_FILE_DIR:tp_thermo_check>
-    )
-  endif()
+  # 设置 RPATH
+  set_thermopack_rpath(tp_thermo_check)
 endif()
