@@ -1,7 +1,7 @@
 #pragma once
 #include <vector>
 #include <memory>
-#include "thermo_adapter.hpp"
+#include "thermopack_adapter.hpp"
 #include <sstream>
 
 namespace thermo {

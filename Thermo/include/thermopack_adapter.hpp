@@ -109,34 +109,40 @@ public:
     return J;
   }
 
-  // -------- 4) ln phi & mu/RT：仅在你确认有“值的公开 getter”时启用 --------
-  std::vector<double>chemicalPotentials(double T, double P,
+  // -------- 4) 化学势 μ：使用 thermopack 的 chemical_potential_tv (理想+剩余) --------
+  // 通过 TP -> TV 转换：先获取摩尔体积 V，再调用 chemical_potential_tv
+  std::vector<double> chemicalPotentials(double T, double P,
              const std::vector<double>& n_or_x,
              int phase) const
   {
-    // std::cout<<"调用chemicalPotentials前 phaseFlag"<<phase<<std::endl;
     auto nx = normalize_n(n_or_x);
     const auto& x = nx.first;
-    const double RT = R_CONST * T;
-    // 1) 拿 lnφ 的“值向量”
-    auto prop = eos_.thermo(T, P, x, phase, /*dlnfugdt*/false,
-                                      /*dlnfugdp*/false,
-                                      /*dlnfugdn*/false);
-    const std::vector<double>& lnphi = prop.value();
-    // for(size_t i = 0; i < lnphi.size() ; ++i){
-    //   std::cout<<lnphi[i]<<"  ";
-    // }
-    // NOTE: avoid spamming stdout in tight loops
-    // 2) μ = RT * ( ln f = lnφ + ln x + ln p )
-    std::vector<double> muRT(lnphi.size());
-    const double lnP = std::log(P);
-    for (size_t i=0;i<muRT.size();++i)
-    muRT[i] = lnphi[i] + std::log(std::max(x[i],1e-300)) + lnP;
+    const double N = nx.second;
 
-    std::vector<double> mu(muRT.size());
-    for(size_t i=0;i<muRT.size();++i)
-      mu[i] = RT * muRT[i];
-    return mu;
+    // 1) 获取摩尔体积 Vm (m³/mol)
+    auto v_prop = eos_.specific_volume(T, P, x, phase);
+    double Vm = v_prop.value();
+
+    // 2) 计算总体积 V = N * Vm
+    double V = N * Vm;
+
+    // 3) 调用 chemical_potential_tv 获取完整化学势 (理想 + 剩余)
+    // property_flag = PropertyFlag::total (0) 表示理想+剩余
+    std::vector<double> n_vec = n_or_x;
+    // 确保 n_vec 是摩尔数而非摩尔分数
+    double s = std::accumulate(n_vec.begin(), n_vec.end(), 0.0);
+    if (std::abs(s - 1.0) < 1e-8) {
+      // 输入是摩尔分数，转换为摩尔数 (假设总摩尔数为1)
+      n_vec = x;
+      V = Vm;
+    }
+
+    auto mu_prop = eos_.chemical_potential_tv(T, V, n_vec,
+                                               /*dmudt*/false,
+                                               /*dmudv*/false,
+                                               /*dmudn*/false,
+                                               PropertyFlag::total);
+    return mu_prop.value();
   }
   
  // -------- 5) Wilson K 值 --------

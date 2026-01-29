@@ -10,12 +10,13 @@ Flash is a C++17 thermodynamic flash calculation engine for multi-phase equilibr
 
 ### Prerequisites
 
-Set these environment variables before building:
+Set this environment variable before building:
 
 ```bash
 export VCPKG_ROOT=/path/to/vcpkg
-export THERMOPACK_DIR=/path/to/thermopack
 ```
+
+Note: ThermoPack is now embedded in the project under `external/thermopack/`, so `THERMOPACK_DIR` is no longer required.
 
 ### Build Commands
 
@@ -71,12 +72,35 @@ Thermo (Thermodynamic Backend)
 External Libraries (ThermoPack, Eigen3)
 ```
 
+### Embedded ThermoPack
+
+ThermoPack is embedded in `external/thermopack/` with the following structure:
+
+```
+external/thermopack/
+├── CMakeLists.txt          # Creates imported thermopack target
+├── include/
+│   └── cppThermopack/      # C++ headers (11 files)
+│       ├── cubic.h
+│       ├── thermo.h
+│       └── ...
+└── lib/
+    └── macos/              # Platform-specific libraries
+        ├── libthermopack.dylib
+        └── libthermopack.a
+```
+
+Build options:
+- `THERMOPACK_USE_STATIC=OFF` (default): Link dynamically
+- `THERMOPACK_USE_STATIC=ON`: Link statically
+
 ### Core Modules
 
 **Thermo/** - Thermodynamic property calculations
 - `thermo_backend.hpp`: Abstract `IThermoBackend` interface defining thermodynamic operations
-- `thermo_adapter.hpp`: `ThermoAdapterTP` wraps ThermoPack's Cubic EOS (PR, SRK)
-- Provides chemical potentials, fugacity coefficients, and their derivatives
+- `thermopack_adapter.hpp`: `ThermoAdapterTP` wraps ThermoPack's Cubic EOS (PR, SRK)
+- Provides chemical potentials (via `chemical_potential_tv`, ideal + residual), fugacity coefficients, and their derivatives
+- Chemical potential calculation: TP → TV conversion using `specific_volume`, then `chemical_potential_tv` with `PropertyFlag::total`
 
 **PhaseStability/** - Phase stability analysis
 - `phase_stability.hpp/cpp`: `PhaseStabilityAnalyzer` class
@@ -144,7 +168,7 @@ Controls solver behavior:
 ### Entry Points
 - `RandFlash::solve()` in `RAND/src/rand_solver.cpp` - Main multi-phase flash solver
 - `PhaseStabilityAnalyzer::analyze()` in `PhaseStability/src/phase_stability.cpp` - Stability testing
-- `ThermoAdapterTP` in `Thermo/include/thermo_adapter.hpp` - Thermodynamic calculations
+- `ThermoAdapterTP` in `Thermo/include/thermopack_adapter.hpp` - Thermodynamic calculations
 
 ### Understanding the Solver
 1. Start with `RAND/include/rand_flash.hpp` for public API
@@ -163,6 +187,9 @@ Controls solver behavior:
 **Branch**: `feature/multiphase`
 
 Recent changes:
+- Embedded ThermoPack into project (`external/thermopack/`), eliminating external dependency
+- Renamed `thermo_adapter.hpp` to `thermopack_adapter.hpp` for clarity
+- Replaced assembled chemical potential with ThermoPack's native `chemical_potential_tv` (ideal + residual)
 - Added switchable stability analysis control via `SolveOptions::enable_stability_analysis`
 - Unified multi-phase interface (removed separate `solveMultiPhase` methods)
 - Improved convergence criteria using reduced chemical potentials
@@ -170,7 +197,7 @@ Recent changes:
 
 ## Dependencies
 
-- **ThermoPack**: Thermodynamic property calculations (must set `THERMOPACK_DIR`)
+- **ThermoPack**: Thermodynamic property calculations (embedded in `external/thermopack/`)
 - **Eigen3**: Linear algebra library (installed via vcpkg)
 - **GTest**: Unit testing framework (installed via vcpkg)
 - **vcpkg**: C++ package manager (must set `VCPKG_ROOT`)

@@ -194,6 +194,6 @@ TEST_F(MultiSystemFlashTest, LLE_Water_Hexane) {
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
-    ::testing::GTEST_FLAG(filter) = "MultiSystemFlashTest.SourGas_H2S_Mix";
+    // ::testing::GTEST_FLAG(filter) = "MultiSystemFlashTest.SourGas_H2S_Mix";
     return RUN_ALL_TESTS();
 }

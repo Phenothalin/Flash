@@ -1,17 +1,7 @@
 {
-    // "cmake.configureArgs": [
-    //     "-DTHERMOPACK_DIR=/Users/madao/code/thermopack",
-    //     "-DBUILD_TP_SANITY_TEST=ON"
-    //   ],
-    //   "cmake.configureEnvironment": {
-    //     "THERMOPACK_DIR": "/Users/madao/code/thermopack"
+    // "cmake.configureSettings": {
+    //     "THERMOPACK_DIR": "/Users/chaochao/Code/thermopack"
     //   },
-    //   "cmake.buildEnvironment": {
-    //     "DYLD_LIBRARY_PATH": "/Users/madao/code/thermopack/installed"
-    //   },   
-    "cmake.configureSettings": {
-        "THERMOPACK_DIR": "/Users/chaochao/Code/thermopack"
-      },
     "files.associations": {
         "cmath": "cpp",
         "limits": "cpp",
