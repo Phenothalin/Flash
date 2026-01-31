@@ -435,10 +435,10 @@ MultiFlashResult RandFlash::solve(
 
     if (want_LLE) {
         comps2 = { liquid_cands[0], liquid_cands[1] };
-        flags2 = { liq, liq };
+        flags2 = { mingibbs, mingibbs };
     } else {
         comps2 = { xV, xL };
-        flags2 = { vap, liq };
+        flags2 = { mingibbs, mingibbs };
     }
 
     // --- 3 相判别（仅当确实需要两套 liquid 时才启用）---
@@ -455,7 +455,7 @@ MultiFlashResult RandFlash::solve(
         sys0.elementMatrix = elementMatrix;
 
         std::vector<std::vector<double>> comps3;
-        std::vector<int> flags3 = {vap, liq, liq};
+        std::vector<int> flags3 = {mingibbs, mingibbs, mingibbs};
 
         // vapor
         if (!vapor_cands.empty()) comps3.push_back(vapor_cands.front());
