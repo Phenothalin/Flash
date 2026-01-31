@@ -161,7 +161,7 @@ TEST_F(MultiSystemFlashTest, Original_11_Comps) {
     double P = 2.0e6;
     
     std::vector<double> z = {
-      1, 0.015, 0.55, 0.14, 0.12,
+      0.003, 0.015, 0.55, 0.14, 0.12,
       0.05, 0.045, 0.03, 0.025, 0.012, 0.01
     };
 

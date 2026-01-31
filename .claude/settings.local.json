@@ -12,7 +12,14 @@
       "Bash(/Users/madao/code/Flash/build/RAND/2phase_tests:*)",
       "Bash(ninja:*)",
       "Bash(/Users/madao/code/Flash/build/RAND/3phase_rand_test:*)",
-      "Bash(/Users/madao/code/Flash/build/RAND/2phase_complex_test:*)"
+      "Bash(/Users/madao/code/Flash/build/RAND/2phase_complex_test:*)",
+      "Bash(grep:*)",
+      "Bash(cmake:*)",
+      "Bash(./RR/RRflash_test:*)",
+      "Bash(./RAND/tests/2phase_tests:*)",
+      "Bash(./RR/RR_vll_test:*)",
+      "Bash(./RAND/2phase_complex_test:*)",
+      "Bash(./RAND/3phase_rand_test:*)"
     ]
   }
 }

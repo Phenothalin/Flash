@@ -17,13 +17,14 @@ target_include_directories(rrflash
     PUBLIC
       ${CMAKE_CURRENT_SOURCE_DIR}/include
       ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
 )
 
-# RR 一般只需要 Eigen；如果内部通过 thermo_backend 用 thermopack，
-# 也可以把 thermo 链上（PUBLIC 透传给上游）
+# RR 需要 thermo 和 phase_stability 库
 target_link_libraries(rrflash
     PUBLIC
-      thermo         # 如果 RR 里用到 thermo backend，就留着
+      thermo
+      phase_stability
       Eigen3::Eigen
 )
 
@@ -42,4 +43,29 @@ target_include_directories(RRflash_test
 target_link_libraries(RRflash_test
     PRIVATE
       rrflash
+      thermo
+      GTest::gtest
+      GTest::gtest_main
+)
+
+# ===================== VLL 三相测试 =====================
+
+add_executable(RR_vll_test
+    tests/RR_vll_test.cpp
+)
+
+target_include_directories(RR_vll_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
+)
+
+target_link_libraries(RR_vll_test
+    PRIVATE
+      rrflash
+      thermo
+      phase_stability
+      GTest::gtest
+      GTest::gtest_main
 )

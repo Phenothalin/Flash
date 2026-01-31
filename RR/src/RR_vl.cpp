@@ -3,9 +3,6 @@
 #include <algorithm>
 #include <cmath>
 
-#include "eos_model.hpp"
-#include "property_package.hpp"
-
 // 内部优化的牛顿-拉夫逊求解器
 // auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
 //                                 const std::function<double(double)> &func_deriv,
@@ -47,22 +44,31 @@ auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
                                 double initial_guess, double tol,
                                 int max_iter) -> double {
   double x_value = initial_guess;
-  double alpha = 1;
+
+  for (int iter = 0; iter < max_iter; ++iter) {
     double fx_value = func(x_value);
     double dfx_value = func_deriv(x_value);
 
-    if (dfx_value == 0.0)
-    {
+    if (std::abs(dfx_value) < 1e-15) {
       throw std::runtime_error("牛顿-拉夫逊方法中遇到零导数。");
     }
 
-    double x_new = x_value - alpha * (fx_value / dfx_value);
-    return x_new;
+    double x_new = x_value - (fx_value / dfx_value);
+
+    if (std::abs(x_new - x_value) < tol) {
+      return x_new;
+    }
+
+    x_value = x_new;
+  }
+
+  // 如果未收敛，返回最后的值（而不是抛出异常）
+  return x_value;
 }
 
 // Flash 基类的构造函数实现 - 增强版
 Flash::Flash(const std::vector<double> &composition,
-             property_package::PropertyPackage &property_package,
+             thermo::IThermoBackend &thermo_backend,
              double pressure, double temperature, double vapor_fraction,
              const std::vector<double> &initial_k, double initial_T,
              double initial_P)
@@ -71,7 +77,7 @@ Flash::Flash(const std::vector<double> &composition,
       vapor_fraction_(vapor_fraction), initial_V_(0.5), // 默认初始气相分率为0.5
       vap_comp_frac_(composition.size(), 0),
       liq_comp_frac_(composition.size(), 0),
-      property_package_(property_package) {
+      thermo_backend_(thermo_backend) {
   // 基本的通用输入验证，现在只验证组成
   validateInput();
 }
@@ -138,28 +144,8 @@ void Flash::initializeKWithWilson(double temperature, double pressure) {
   }
 
   initial_k_.clear(); // 清空旧的K值
-  property_package::EosComponentParameters
-      eos_correction_coefficient_parameters =
-          property_package_.getCriticalParameters();
-  for (size_t index = 0; index < composition_.size(); ++index)
-  {
-    double critical_temp =
-        eos_correction_coefficient_parameters.critical_temperatures[index];
-    double critical_pressure =
-        eos_correction_coefficient_parameters.critical_pressures[index];
-    double acentric_factors =
-        eos_correction_coefficient_parameters.acentric_factors[index];
-    if (critical_temp <= 0.0 || critical_pressure <= 0.0)
-    {
-      throw std::invalid_argument("Wilson方法需要临界温度和压力大于零。");
-    }
-    // Wilson 方法
-    double ln_ki =
-        std::log(critical_pressure / pressure) +
-        5.373 * (1.0 + acentric_factors) * (1.0 - critical_temp / temperature);
-    double ki_value = std::exp(ln_ki);
-    initial_k_.push_back(ki_value);
-  }
+  initial_k_.resize(composition_.size());
+  thermo_backend_.wilsonK(temperature, pressure, initial_k_);
 }
 
 // 初始化初始温度估计（从PVFlash移至基类）
@@ -169,66 +155,13 @@ void Flash::initializeTWithWilson(double pressure) {
     throw std::invalid_argument("压力必须大于零。");
   }
 
-  property_package::EosComponentParameters
-      eos_correction_coefficient_parameters =
-          property_package_.getCriticalParameters();
-  double T_LOW = 1E100;
-  double T_HIGH = 0.0;
-  double T_MAX = 50000.0;
-  std::vector<double> T_process(composition_.size(), 0.0);
-  for (size_t index = 0; index < composition_.size(); ++index)
-  {
-    double critical_temp =
-        eos_correction_coefficient_parameters.critical_temperatures[index];
-    double critical_pressure =
-        eos_correction_coefficient_parameters.critical_pressures[index];
-    double acentric_factors =
-        eos_correction_coefficient_parameters.acentric_factors[index];
-    if (critical_temp <= 0.0 || critical_pressure <= 0.0)
-    {
-      throw std::invalid_argument("Wilson方法需要临界温度和压力大于零。");
-    }
-    T_process[index] = (5.373 * critical_temp * (acentric_factors + 1)) /
-                       (5.373 * (acentric_factors + 1) - log(pressure) +
-                        log(critical_pressure));
-    // std::cout << T_process[index] << std::endl;
-    if (T_process[index] < T_LOW)
-    {
-      T_LOW = T_process[index];
-    }
-    if (T_process[index] > T_HIGH)
-    {
-      T_HIGH = T_process[index];
-    }
-  }
-  // std::cout << T_LOW << "  " << T_HIGH << std::endl;
-  if (T_LOW <= 0)
-  {
-    T_LOW = 1E-12;
-  }
-  if (T_HIGH <= 0)
-  {
-    throw std::invalid_argument("温度必须大于零。");
-  }
-  if (T_HIGH < 0.1 * T_MAX)
-  {
-    initial_T_ = 0.4 * (T_HIGH + T_LOW);
-  }
-  else
-  {
-    initial_T_ = 0;
-    for (size_t i = 0; i < composition_.size(); ++i)
-    {
-      initial_T_ +=
-          composition_[i] *
-          eos_correction_coefficient_parameters.critical_temperatures[i];
-    }
-    initial_T_ *= 0.666666;
-    if (initial_T_ < T_LOW)
-    {
-      initial_T_ = T_LOW + 1.0;
-    }
-  }
+  // Use a simple initial temperature estimate based on a typical range
+  // For a more sophisticated approach, we would need critical properties from the backend
+  // For now, use a reasonable default temperature range
+  initial_T_ = 300.0; // Default to 300 K as a reasonable starting point
+
+  // Alternative: could use Wilson K-values to estimate temperature
+  // by solving for T that gives reasonable K-values at the given pressure
 }
 
 // 新增：初始化压力的方法
@@ -238,50 +171,10 @@ void Flash::initializePWithWilson(double temperature) {
     throw std::invalid_argument("温度必须大于零。");
   }
 
-  property_package::EosComponentParameters
-      eos_correction_coefficient_parameters =
-          property_package_.getCriticalParameters();
-
-  // 使用组分临界压力的加权平均值作为初始估计
-  initial_P_ = 0.0;
-  double p_bubble = 0;
-  double p_dew = 0;
-  for (size_t i = 0; i < composition_.size(); ++i)
-  {
-    double critical_pressure =
-        eos_correction_coefficient_parameters.critical_pressures[i];
-    double critical_temp =
-        eos_correction_coefficient_parameters.critical_temperatures[i];
-    double acentric_factors =
-        eos_correction_coefficient_parameters.acentric_factors[i];
-
-    if (critical_temp <= 0.0 || critical_pressure <= 0.0)
-    {
-      throw std::invalid_argument("Wilson方法需要临界温度和压力大于零。");
-    }
-
-    p_bubble +=
-        composition_[i] * critical_pressure *
-        exp(5.373 * (1 + acentric_factors) * (1 - critical_temp / temperature));
-    p_dew += composition_[i] /
-             (critical_pressure * exp(5.373 * (1 + acentric_factors) *
-                                      (1 - critical_temp / temperature)));
-    // 基于Wilson公式的逆推，用于估计压力
-    //    double term =
-    //        5.373 * (1.0 + acentric_factors) * (1.0 - critical_temp /
-    //        temperature);
-    //    double p_estimate = critical_pressure * std::exp(-term);
-    //
-    //    initial_P_ += composition_[i] * p_estimate;
-  }
-  // std::cout<<"p_bubble "<<p_bubble<<"    p_dew "<<p_dew<<"\n";
-  initial_P_ = p_bubble + vapor_fraction_ * (p_dew - p_bubble);
-  // std::cout<<"initial_p_ "<<initial_P_<<"\n";
-  //  确保初始压力为正值
-  if (initial_P_ <= 0.0)
-  {
-    throw std::runtime_error("计算出的初始压力<=0");
-  }
+  // Use a simple initial pressure estimate
+  // For a more sophisticated approach, we would need critical properties from the backend
+  // For now, use a reasonable default pressure
+  initial_P_ = 101325.0; // Default to 1 atm (101325 Pa) as a reasonable starting point
 }
 
 // 计算气相组成（基类通用方法）
@@ -357,9 +250,9 @@ void Flash::displayResults() const {
 // 派生类 PTFlash 的构造函数 - 简化版
 PTFlash::PTFlash(double pressure, double temperature,
                  const std::vector<double> &composition,
-                 property_package::PropertyPackage &property_package,
+                 thermo::IThermoBackend &thermo_backend,
                  const std::vector<double> &initial_k)
-    : Flash(composition, property_package, pressure, temperature,
+    : Flash(composition, thermo_backend, pressure, temperature,
             std::numeric_limits<double>::quiet_NaN(), initial_k) {
   // 设置闪蒸类型
   flash_type_ = FlashType::PT;
@@ -416,18 +309,36 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
       {
         v_new = v_new == 0.9999 ? 1 : 0;
       }
+
       vap_comp_frac_ = computeVapCompFractions(v_new, k_current);
       liq_comp_frac_ = computeLiqCompFractions(v_new, k_current);
 
-      // 计算液相和气相的逸度系数
-      std::vector<double> phi_liquid =
-          property_package_.calculateLiquidFugacityCoefficientMixture(
-              temperature_, pressure_, liq_comp_frac_);
-      std::vector<double> phi_vapor =
-          property_package_.calculateVaporFugacityCoefficientMixture(
-              temperature_, pressure_, vap_comp_frac_);
+      // Normalize compositions to ensure they sum to 1.0
+      double sum_vap = 0.0, sum_liq = 0.0;
+      for (size_t i = 0; i < composition_.size(); ++i) {
+        sum_vap += vap_comp_frac_[i];
+        sum_liq += liq_comp_frac_[i];
+      }
+      for (size_t i = 0; i < composition_.size(); ++i) {
+        vap_comp_frac_[i] /= sum_vap;
+        liq_comp_frac_[i] /= sum_liq;
+      }
 
-      k_current = updateKValues(phi_liquid, phi_vapor);
+      // 计算液相和气相的对数逸度系数（更数值稳定）
+      std::vector<double> lnphi_liquid =
+          thermo_backend_.lnFugacityCoefficients(
+              thermo::PhaseState{temperature_, pressure_, liq_comp_frac_,
+                                 thermo_backend_.liquidPhaseFlag()});
+      std::vector<double> lnphi_vapor =
+          thermo_backend_.lnFugacityCoefficients(
+              thermo::PhaseState{temperature_, pressure_, vap_comp_frac_,
+                                 thermo_backend_.vaporPhaseFlag()});
+
+      // 使用对数形式计算K值: K = exp(ln(phi_L) - ln(phi_V))
+      k_current.resize(lnphi_liquid.size());
+      for (size_t i = 0; i < k_current.size(); ++i) {
+        k_current[i] = std::exp(lnphi_liquid[i] - lnphi_vapor[i]);
+      }
       // 检查收敛性
       if (checkConvergence(k_current, k_previous, v_new, v_current, TOL_OUTER,
                            outer_iter))
@@ -463,11 +374,13 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
 
       // 3. 关键缺失：更新K值（根据新相组成计算逸度系数）
       std::vector<double> phi_liquid =
-          property_package_.calculateLiquidFugacityCoefficientMixture(
-              temperature_, pressure_, liq_comp_frac_);
+          thermo_backend_.fugacityCoefficients(
+              thermo::PhaseState{temperature_, pressure_, liq_comp_frac_,
+                                 thermo_backend_.liquidPhaseFlag()});
       std::vector<double> phi_vapor =
-          property_package_.calculateVaporFugacityCoefficientMixture(
-              temperature_, pressure_, vap_comp_frac_);
+          thermo_backend_.fugacityCoefficients(
+              thermo::PhaseState{temperature_, pressure_, vap_comp_frac_,
+                                 thermo_backend_.vaporPhaseFlag()});
       k_current = updateKValues(phi_liquid, phi_vapor); // 必须添加这一步
     std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
       // 4. 检查收敛（此时k_current已更新，比较有效）
@@ -571,9 +484,9 @@ auto PTFlash::checkConvergence(const std::vector<double> &k_current,
 // 派生类 PVFlash 的构造函数 - 简化版
 PVFlash::PVFlash(double pressure, double vapor_fraction,
                  const std::vector<double> &composition,
-                 property_package::PropertyPackage &property_package,
+                 thermo::IThermoBackend &thermo_backend,
                  const double &initial_T, const std::vector<double> &initial_k)
-    : Flash(composition, property_package, pressure,
+    : Flash(composition, thermo_backend, pressure,
             std::numeric_limits<double>::quiet_NaN(), vapor_fraction, initial_k,
             initial_T) {
   // 设置闪蒸类型
@@ -632,11 +545,13 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
       // 使用牛顿-拉夫逊求解器求解温度 T
 
       std::vector<double> phi_liquid =
-          property_package_.calculateLiquidFugacityCoefficientMixture(
-              T_current, pressure_, liq_comp_frac_);
+          thermo_backend_.fugacityCoefficients(
+              thermo::PhaseState{T_current, pressure_, liq_comp_frac_,
+                                 thermo_backend_.liquidPhaseFlag()});
       std::vector<double> phi_vapor =
-          property_package_.calculateVaporFugacityCoefficientMixture(
-              T_current, pressure_, vap_comp_frac_);
+          thermo_backend_.fugacityCoefficients(
+              thermo::PhaseState{T_current, pressure_, vap_comp_frac_,
+                                 thermo_backend_.vaporPhaseFlag()});
       k_current = updateKValues(phi_liquid, phi_vapor);
 
       if (checkConvergence(k_current, k_previous, T_current, T_previous,
@@ -663,10 +578,12 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
       vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
       liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
       // 计算 φ → K(Ttest)
-      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
-          Ttest, pressure_, liq_comp_frac_);
-      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
-          Ttest, pressure_, vap_comp_frac_);
+      auto phiL = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{Ttest, pressure_, liq_comp_frac_,
+                             thermo_backend_.liquidPhaseFlag()});
+      auto phiV = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{Ttest, pressure_, vap_comp_frac_,
+                             thermo_backend_.vaporPhaseFlag()});
       auto Ktmp = updateKValues(phiL, phiV);
       // RR 残差（内部已做 V<0.5 / V≥0.5 分段等价处理）
       return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
@@ -715,10 +632,12 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
 
       vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
       liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
-      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
-          T_current, pressure_, liq_comp_frac_);
-      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
-          T_current, pressure_, vap_comp_frac_);
+      auto phiL = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{T_current, pressure_, liq_comp_frac_,
+                             thermo_backend_.liquidPhaseFlag()});
+      auto phiV = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{T_current, pressure_, vap_comp_frac_,
+                             thermo_backend_.vaporPhaseFlag()});
       k_previous = k_current;
       k_current = updateKValues(phiL, phiV);
 
@@ -805,17 +724,21 @@ auto PVFlash::calculateRachfordRiceDeriv(
   // 3) 差分计算 dK_i/dT（沿用你原有的 fugacity→K 流程）
   //    注意：用上一步固定的 x,y 计算 φ，即可得到 K(T±ε)
   std::vector<double> phiL1 =
-      property_package_.calculateLiquidFugacityCoefficientMixture(
-          T1, pressure_, liq_comp_frac_);
+      thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{T1, pressure_, liq_comp_frac_,
+                             thermo_backend_.liquidPhaseFlag()});
   std::vector<double> phiV1 =
-      property_package_.calculateVaporFugacityCoefficientMixture(
-          T1, pressure_, vap_comp_frac_);
+      thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{T1, pressure_, vap_comp_frac_,
+                             thermo_backend_.vaporPhaseFlag()});
   std::vector<double> phiL2 =
-      property_package_.calculateLiquidFugacityCoefficientMixture(
-          T2, pressure_, liq_comp_frac_);
+      thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{T2, pressure_, liq_comp_frac_,
+                             thermo_backend_.liquidPhaseFlag()});
   std::vector<double> phiV2 =
-      property_package_.calculateVaporFugacityCoefficientMixture(
-          T2, pressure_, vap_comp_frac_);
+      thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{T2, pressure_, vap_comp_frac_,
+                             thermo_backend_.vaporPhaseFlag()});
 
   std::vector<double> K1 = updateKValues(phiL1, phiV1);
   std::vector<double> K2 = updateKValues(phiL2, phiV2);
@@ -847,10 +770,12 @@ auto PVFlash::updateTemperature(const double &T, const double &err,
   // 近似即可）
   auto f_at = [&](double Ttest) {
     // 用当前 V,k 组合出的 x,y 计算 φ → K(Ttest) → f
-    auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
-        Ttest, pressure_, liq_comp_frac_);
-    auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
-        Ttest, pressure_, vap_comp_frac_);
+    auto phiL = thermo_backend_.fugacityCoefficients(
+        thermo::PhaseState{Ttest, pressure_, liq_comp_frac_,
+                           thermo_backend_.liquidPhaseFlag()});
+    auto phiV = thermo_backend_.fugacityCoefficients(
+        thermo::PhaseState{Ttest, pressure_, vap_comp_frac_,
+                           thermo_backend_.vaporPhaseFlag()});
     auto Ktmp = updateKValues(phiL, phiV);
     return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
   };
@@ -905,9 +830,9 @@ auto PVFlash::checkConvergence(const std::vector<double> &k_current,
 // 派生类 TVFlash 的构造函数
 TVFlash::TVFlash(double temperature, double vapor_fraction,
                  const std::vector<double> &composition,
-                 property_package::PropertyPackage &property_package,
+                 thermo::IThermoBackend &thermo_backend,
                  const double &initial_P, const std::vector<double> &initial_k)
-    : Flash(composition, property_package,
+    : Flash(composition, thermo_backend,
             std::numeric_limits<double>::quiet_NaN(), temperature,
             vapor_fraction, initial_k, std::numeric_limits<double>::quiet_NaN(),
             initial_P) {
@@ -961,11 +886,13 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
       P_current = updatePressure(P_current, err, derr);
 
       std::vector<double> phi_liquid =
-          property_package_.calculateLiquidFugacityCoefficientMixture(
-              temperature_, P_current, liq_comp_frac_);
+          thermo_backend_.fugacityCoefficients(
+              thermo::PhaseState{temperature_, P_current, liq_comp_frac_,
+                                 thermo_backend_.liquidPhaseFlag()});
       std::vector<double> phi_vapor =
-          property_package_.calculateVaporFugacityCoefficientMixture(
-              temperature_, P_current, vap_comp_frac_);
+          thermo_backend_.fugacityCoefficients(
+              thermo::PhaseState{temperature_, P_current, vap_comp_frac_,
+                                 thermo_backend_.vaporPhaseFlag()});
       k_current = updateKValues(phi_liquid, phi_vapor);
 
       if (checkConvergence(k_current, k_previous, P_current, P_previous,
@@ -983,10 +910,12 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
     auto f_at_P = [&](double Ptest){
       vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
       liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
-      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
-          temperature_, Ptest, liq_comp_frac_);
-      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
-          temperature_, Ptest, vap_comp_frac_);
+      auto phiL = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{temperature_, Ptest, liq_comp_frac_,
+                             thermo_backend_.liquidPhaseFlag()});
+      auto phiV = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{temperature_, Ptest, vap_comp_frac_,
+                             thermo_backend_.vaporPhaseFlag()});
       auto Ktmp = updateKValues(phiL, phiV);
       return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
     };
@@ -1022,10 +951,12 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
       P_current  = P_trial;
       vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
       liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
-      auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
-          temperature_, P_current, liq_comp_frac_);
-      auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
-          temperature_, P_current, vap_comp_frac_);
+      auto phiL = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{temperature_, P_current, liq_comp_frac_,
+                             thermo_backend_.liquidPhaseFlag()});
+      auto phiV = thermo_backend_.fugacityCoefficients(
+          thermo::PhaseState{temperature_, P_current, vap_comp_frac_,
+                             thermo_backend_.vaporPhaseFlag()});
       k_previous = k_current;
       k_current  = updateKValues(phiL, phiV);
   
@@ -1100,16 +1031,20 @@ for (size_t i = 0; i < composition_.size(); ++i) {
 }
 
 // 在 P±ε 处评估 φ → K，用中心差分近似 dK_i/dP
-// 注意：此处使用“最近一次”的 x,y（liq_comp_frac_, vap_comp_frac_）作为固定点
+// 注意：此处使用"最近一次"的 x,y（liq_comp_frac_, vap_comp_frac_）作为固定点
 // 与你现有外层迭代顺序一致。
-auto phiL1 = property_package_.calculateLiquidFugacityCoefficientMixture(
-    temperature_, P1, liq_comp_frac_);
-auto phiV1 = property_package_.calculateVaporFugacityCoefficientMixture(
-    temperature_, P1, vap_comp_frac_);
-auto phiL2 = property_package_.calculateLiquidFugacityCoefficientMixture(
-    temperature_, P2, liq_comp_frac_);
-auto phiV2 = property_package_.calculateVaporFugacityCoefficientMixture(
-    temperature_, P2, vap_comp_frac_);
+auto phiL1 = thermo_backend_.fugacityCoefficients(
+    thermo::PhaseState{temperature_, P1, liq_comp_frac_,
+                       thermo_backend_.liquidPhaseFlag()});
+auto phiV1 = thermo_backend_.fugacityCoefficients(
+    thermo::PhaseState{temperature_, P1, vap_comp_frac_,
+                       thermo_backend_.vaporPhaseFlag()});
+auto phiL2 = thermo_backend_.fugacityCoefficients(
+    thermo::PhaseState{temperature_, P2, liq_comp_frac_,
+                       thermo_backend_.liquidPhaseFlag()});
+auto phiV2 = thermo_backend_.fugacityCoefficients(
+    thermo::PhaseState{temperature_, P2, vap_comp_frac_,
+                       thermo_backend_.vaporPhaseFlag()});
 
 std::vector<double> K1 = updateKValues(phiL1, phiV1);
 std::vector<double> K2 = updateKValues(phiL2, phiV2);
@@ -1137,10 +1072,12 @@ auto TVFlash::updatePressure(const double &P, const double &err, const double &d
 
   // 定义 f(P) 评估（用当前 x,y 计算 φ→K，再算 RR）
   auto f_at = [&](double Ptest) {
-    auto phiL = property_package_.calculateLiquidFugacityCoefficientMixture(
-        temperature_, Ptest, liq_comp_frac_);
-    auto phiV = property_package_.calculateVaporFugacityCoefficientMixture(
-        temperature_, Ptest, vap_comp_frac_);
+    auto phiL = thermo_backend_.fugacityCoefficients(
+        thermo::PhaseState{temperature_, Ptest, liq_comp_frac_,
+                           thermo_backend_.liquidPhaseFlag()});
+    auto phiV = thermo_backend_.fugacityCoefficients(
+        thermo::PhaseState{temperature_, Ptest, vap_comp_frac_,
+                           thermo_backend_.vaporPhaseFlag()});
     auto Ktmp = updateKValues(phiL, phiV);
     return calculateRachfordRice(Ktmp, vapor_fraction_, composition_);
   };

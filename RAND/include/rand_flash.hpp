@@ -95,12 +95,29 @@ struct MultiFlashResult {
   bool success = false;
   double pressure = 0.0;
   double temperature = 0.0;
-  std::vector<double> feedComposition;                 
-  std::vector<std::vector<double>> n_phase;            // F x C
-  std::vector<double> beta;                            // F
-  int iterations = 0;                                  
-  double mu_infinity_norm = 0.0;                       
-  double elem_residual_inf = 0.0;                      
+  std::vector<double> feedComposition;
+  std::vector<PhaseContext> phases;                    // F - 包含各相的完整上下文（含phaseFlag、moleNumbers等）
+  int iterations = 0;
+  double mu_infinity_norm = 0.0;
+  double elem_residual_inf = 0.0;
+
+  // 便捷方法：获取相数
+  size_t numPhases() const { return phases.size(); }
+
+  // 便捷方法：获取第j相的总摩尔数（beta）
+  double beta(size_t j) const {
+    if (j >= phases.size()) return 0.0;
+    double sum = 0.0;
+    for (double n : phases[j].state.moleNumbers) sum += n;
+    return sum;
+  }
+
+  // 便捷方法：获取第j相的摩尔数向量
+  const std::vector<double>& n_phase(size_t j) const {
+    static const std::vector<double> empty;
+    if (j >= phases.size()) return empty;
+    return phases[j].state.moleNumbers;
+  }
 };
 
 class RandFlash {

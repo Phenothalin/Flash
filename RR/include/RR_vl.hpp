@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <limits>
-#include "property_package.hpp"
+#include "thermo_backend.hpp"
 
 // 闪蒸类型枚举
 enum class FlashType { PT, PV, TV };
@@ -33,12 +33,12 @@ protected:
   std::vector<double> initial_k_;
   std::vector<double> vap_comp_frac_;
   std::vector<double> liq_comp_frac_;
-  property_package::PropertyPackage &property_package_;
+  thermo::IThermoBackend &thermo_backend_;
   FlashType flash_type_;
 
 public:
   Flash(const std::vector<double> &composition,
-        property_package::PropertyPackage &property_package,
+        thermo::IThermoBackend &thermo_backend,
         double pressure, double temperature, double vapor_fraction,
         const std::vector<double> &initial_k = {},
         double initial_T = std::numeric_limits<double>::quiet_NaN(),
@@ -76,7 +76,7 @@ public:
 class PTFlash : public Flash {
 public:
   PTFlash(double pressure, double temperature, const std::vector<double> &composition,
-          property_package::PropertyPackage &property_package,
+          thermo::IThermoBackend &thermo_backend,
           const std::vector<double> &initial_k = {});
   void calculate(ConvergenceMethod method) override;
 
@@ -95,7 +95,7 @@ private:
 class PVFlash : public Flash {
 public:
   PVFlash(double pressure, double vapor_fraction, const std::vector<double> &composition,
-          property_package::PropertyPackage &property_package,
+          thermo::IThermoBackend &thermo_backend,
           const double &initial_T = std::numeric_limits<double>::quiet_NaN(),
           const std::vector<double> &initial_k = {});
   void calculate(ConvergenceMethod method) override;
@@ -118,7 +118,7 @@ private:
 class TVFlash : public Flash {
 public:
   TVFlash(double temperature, double vapor_fraction, const std::vector<double> &composition,
-          property_package::PropertyPackage &property_package,
+          thermo::IThermoBackend &thermo_backend,
           const double &initial_P = std::numeric_limits<double>::quiet_NaN(),
           const std::vector<double> &initial_k = {});
   void calculate(ConvergenceMethod method) override;

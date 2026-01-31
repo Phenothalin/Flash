@@ -840,49 +840,56 @@ void RandFlash::printResult(const MultiFlashResult& res) const {
   std::cout << "Status:      " << (res.success ? "CONVERGED" : "FAILED") << "\n";
   std::cout << "Error Norm:  " << std::scientific << std::setprecision(4) << res.mu_infinity_norm << "\n";
 
-  size_t F = res.beta.size();
+  size_t F = res.phases.size();
   if (F == 0) {
       std::cout << "No phases returned.\n";
       std::cout << "===========================================================================\n";
       return;
   }
 
-  size_t C = 0;
-  if (!res.n_phase.empty()) C = res.n_phase[0].size();
+  size_t C = res.phases[0].state.moleNumbers.size();
 
   // 校验一下组分数量是否匹配，防止越界打印
   if (compNames.size() != C) {
-      // 如果数量不对（极少情况），补全或截断，防止 crash
       compNames.resize(C, "Unknown");
   }
 
   double total_moles = 0.0;
-  for (double b : res.beta) total_moles += b;
+  for (size_t j = 0; j < F; ++j) {
+      total_moles += res.beta(j);
+  }
 
   std::cout << std::fixed << std::setprecision(5);
 
   for (size_t j = 0; j < F; ++j) {
-      double phase_frac = (total_moles > 1e-12) ? (res.beta[j] / total_moles) : 0.0;
-      
-      std::string phaseType = "Phase";
-      if (j == 0) phaseType = "Vapor (Approx)";
-      else phaseType = "Liquid " + std::to_string(j);
+      double beta_j = res.beta(j);
+      double phase_frac = (total_moles > 1e-12) ? (beta_j / total_moles) : 0.0;
+
+      // 使用phases中存储的phaseFlag判断相态
+      std::string phaseType;
+      int flag = res.phases[j].state.phaseFlag;
+      if (flag == thermo_.vaporPhaseFlag()) {
+          phaseType = "Vapor";
+      } else {
+          phaseType = "Liquid";
+      }
 
       std::cout << "\n---------------------------------------------------------------------------\n";
-      std::cout << " " << phaseType << " " << j << " | Phase Fraction (Beta): " << phase_frac << " | Total Moles: " << res.beta[j] << "\n";
+      std::cout << " " << phaseType << " " << j << " | Phase Fraction (Beta): " << phase_frac << " | Total Moles: " << beta_j << "\n";
       std::cout << "---------------------------------------------------------------------------\n";
-      std::cout << "  Idx | " << std::left << std::setw(15) << "Component" << " | " 
-                << std::right << std::setw(12) << "Mole Frac (x)" << " | " 
+      std::cout << "  Idx | " << std::left << std::setw(15) << "Component" << " | "
+                << std::right << std::setw(12) << "Mole Frac (x)" << " | "
                 << std::setw(12) << "Moles (n)" << "\n";
       std::cout << "------+-----------------+--------------+--------------\n";
 
+      const auto& n_j = res.phases[j].state.moleNumbers;
       for (size_t i = 0; i < C; ++i) {
-          double n_i = res.n_phase[j][i];
-          double x_i = (res.beta[j] > 1e-20) ? (n_i / res.beta[j]) : 0.0;
-          
-          std::cout << "  " << std::setw(3) << i << " | " 
-                    << std::left << std::setw(15) << compNames[i] << " | " 
-                    << std::right << std::setw(12) << x_i << " | " 
+          double n_i = n_j[i];
+          double x_i = (beta_j > 1e-20) ? (n_i / beta_j) : 0.0;
+
+          std::cout << "  " << std::setw(3) << i << " | "
+                    << std::left << std::setw(15) << compNames[i] << " | "
+                    << std::right << std::setw(12) << x_i << " | "
                     << std::scientific << std::setprecision(4) << n_i << std::fixed << std::setprecision(5) << "\n";
       }
   }

@@ -26,15 +26,38 @@ static int find_water_index(const thermo::IThermoBackend& thermo, size_t C) {
     return -1;
 }
 
+// 根据压缩因子确定实际相态并更新phaseFlag
+// Z > 0.5 为气相，Z <= 0.5 为液相
+static void determine_phase_types(
+    MultiFlashResult& res,
+    thermo::IThermoBackend& thermo)
+{
+    const int vap = thermo.vaporPhaseFlag();
+    const int liq = thermo.liquidPhaseFlag();
+
+    for (size_t j = 0; j < res.phases.size(); ++j) {
+        double beta = res.beta(j);
+        if (beta < 1e-10) continue;  // 跳过消失的相
+
+        // 计算压缩因子
+        double Z = thermo.compressibilityFactor(res.phases[j].state);
+
+        // 根据Z值确定phaseFlag
+        if (Z > 0.5) {
+            res.phases[j].state.phaseFlag = vap;
+        } else {
+            res.phases[j].state.phaseFlag = liq;
+        }
+    }
+}
+
 static void reorder_flash_result(
     MultiFlashResult& res,
-    const std::vector<int>& phaseFlags,
     int vaporFlag,
-    int liquidFlag,
     int water_idx)
 {
-    const size_t F = res.n_phase.size();
-    if (F <= 1 || phaseFlags.size() != F) return;
+    const size_t F = res.phases.size();
+    if (F <= 1) return;
 
     // Build (idx, isVap, beta, x_water)
     struct Key {
@@ -47,13 +70,14 @@ static void reorder_flash_result(
     keys.reserve(F);
 
     for (size_t j = 0; j < F; ++j) {
-        double beta = 0.0;
-        for (double v : res.n_phase[j]) beta += v;
+        const auto& n = res.phases[j].state.moleNumbers;
+        double beta = std::accumulate(n.begin(), n.end(), 0.0);
         double xw = 0.0;
-        if (water_idx >= 0 && beta > 0.0 && static_cast<size_t>(water_idx) < res.n_phase[j].size()) {
-            xw = res.n_phase[j][static_cast<size_t>(water_idx)] / beta;
+        if (water_idx >= 0 && beta > 0.0 && static_cast<size_t>(water_idx) < n.size()) {
+            xw = n[static_cast<size_t>(water_idx)] / beta;
         }
-        keys.push_back(Key{j, phaseFlags[j] == vaporFlag, beta, xw});
+        bool isVap = (res.phases[j].state.phaseFlag == vaporFlag);
+        keys.push_back(Key{j, isVap, beta, xw});
     }
 
     // Primary sort: vapor first
@@ -72,18 +96,15 @@ static void reorder_flash_result(
     });
 
     // Apply permutation
-    std::vector<std::vector<double>> n_new;
-    std::vector<double> beta_new;
-    n_new.reserve(F);
-    beta_new.reserve(F);
+    std::vector<PhaseContext> phases_new;
+    phases_new.reserve(F);
 
     for (const auto& k : keys) {
-        n_new.push_back(res.n_phase[k.idx]);
-        beta_new.push_back(res.beta.empty() ? k.beta : res.beta[k.idx]);
+        phases_new.push_back(res.phases[k.idx]);
     }
-    res.n_phase.swap(n_new);
-    res.beta.swap(beta_new);
+    res.phases.swap(phases_new);
 }
+
 
 static double phase_beta(const std::vector<double>& n) {
     return std::accumulate(n.begin(), n.end(), 0.0);
@@ -260,12 +281,16 @@ MultiFlashResult RandFlash::solveWithPhaseGuesses(
     // 3) 核心求解
     auto res = solveGeneral(sys, maxIter, tol);
 
-    // 4) 结果相序稳定化（Vapor -> (Oil-like) -> (Water-like)）
-    if (res.success && res.n_phase.size() == sys.phases.size()) {
+    // 4) 根据压缩因子确定实际相态
+    if (res.success) {
+        determine_phase_types(res, thermo_);
+    }
+
+    // 5) 结果相序稳定化（Vapor -> (Oil-like) -> (Water-like)）
+    if (res.success && res.phases.size() == sys.phases.size()) {
         const int vap = thermo_.vaporPhaseFlag();
-        const int liq = thermo_.liquidPhaseFlag();
         const int water_idx = find_water_index(thermo_, input.feedMoles.size());
-        reorder_flash_result(res, phaseFlags, vap, liq, water_idx);
+        reorder_flash_result(res, vap, water_idx);
     }
     return res;
 }
@@ -280,11 +305,11 @@ MultiFlashResult RandFlash::solve(
     int maxIter,
     double tol)
 {
-    // 若用户给了初值，则按给定相数直接求解（相标志保持默认：0 为气相，其余为液相）
+    // 若用户给了初值，则按给定相数直接求解
+    // 使用minGibbsPhaseFlag让ThermoPack自动选择Gibbs能最低的根
     if (!initialPhaseCompositions.empty()) {
         const int F = static_cast<int>(initialPhaseCompositions.size());
-        std::vector<int> flags(F, thermo_.liquidPhaseFlag());
-        if (F > 0) flags[0] = thermo_.vaporPhaseFlag();
+        std::vector<int> flags(F, thermo_.minGibbsPhaseFlag());
         return solveWithPhaseGuesses(input, elementMatrix, initialPhaseCompositions, flags, maxIter, tol);
     }
 
@@ -303,12 +328,17 @@ MultiFlashResult RandFlash::solve(
         result.pressure = input.pressure;
         result.temperature = input.temperature;
         result.feedComposition = input.feedMoles;
-
-        const double tot = std::accumulate(input.feedMoles.begin(), input.feedMoles.end(), 0.0);
-        result.n_phase = {input.feedMoles};
-        result.beta = {tot};
         result.mu_infinity_norm = 0.0;
         result.elem_residual_inf = 0.0;
+
+        // 构造单相的PhaseContext，使用analyze中的参考相相态
+        PhaseContext singlePhase;
+        singlePhase.state.Temperature = input.temperature;
+        singlePhase.state.Pressure = input.pressure;
+        singlePhase.state.moleNumbers = input.feedMoles;
+        singlePhase.state.phaseFlag = stab.reference_phase_flag;  // 使用稳定性分析的参考相
+        result.phases = {singlePhase};
+
         return result;
     }
 
@@ -332,6 +362,7 @@ MultiFlashResult RandFlash::solve(
 
     const int vap = thermo_.vaporPhaseFlag();
     const int liq = thermo_.liquidPhaseFlag();
+    const int mingibbs = thermo_.minGibbsPhaseFlag();
 
     // Wilson K (用于在 stability 未给出某类 incipient 时构造更“有偏”的相组成初猜)
     std::vector<double> K(input.feedMoles.size(), 1.0);
@@ -463,6 +494,7 @@ MultiFlashResult RandFlash::solve(
 {
     const int vap = thermo_.vaporPhaseFlag();
     const int liq = thermo_.liquidPhaseFlag();
+    const int mingibbs = thermo_.minGibbsPhaseFlag();
 
     // 0) 若用户给了初始相组成：直接走给定相数（跳过 stability analysis）
     if (!opt.initial_phase_compositions.empty()) {
@@ -474,8 +506,8 @@ MultiFlashResult RandFlash::solve(
             }
             flags = opt.forced_phase_flags;
         } else {
-            flags.assign(F, liq);
-            if (F >= 2) flags[0] = vap;
+            // 默认使用minGibbsPhaseFlag，让ThermoPack自动选择Gibbs能最低的根
+            flags.assign(F, mingibbs);
         }
         return solveWithPhaseGuesses(input, elementMatrix, opt.initial_phase_compositions, flags, maxIter, tol);
     }
@@ -499,8 +531,8 @@ MultiFlashResult RandFlash::solve(
         }
         flags = opt.forced_phase_flags;
     } else {
-        flags.assign(F, liq);
-        if (F >= 2) flags[0] = vap;
+        // 默认使用minGibbsPhaseFlag
+        flags.assign(F, mingibbs);
     }
 
     // 2.2 helpers
@@ -719,21 +751,19 @@ MultiFlashResult RandFlash::solveGeneral(
                 result.mu_infinity_norm = conv.max_mu_diff;
                 result.elem_residual_inf = conv.elem_error;
 
-                result.n_phase = n_post;
-                result.beta.resize(F);
-                for (size_t j = 0; j < F; ++j) {
-                    result.beta[j] = std::accumulate(n_post[j].begin(), n_post[j].end(), 0.0);
-                }
+                result.phases = sys.phases;  // 保存各相的完整上下文（含phaseFlag）
                 return result;
             }
         }
     } catch (const std::exception& e) {
         std::cerr << "[RandFlash] Exception: " << e.what() << std::endl;
         result.success = false;
+        result.phases = sys.phases;  // 保存当前状态
         return result;
     }
 
     result.success = false;
+    result.phases = sys.phases;  // 保存当前状态
     return result;
 }
 } // namespace randflash

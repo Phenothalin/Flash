@@ -44,11 +44,13 @@ public:
                            bool volume_shift = false)
   : eos_(components_csv, eos, mixing, alpha, ref, volume_shift),
     liqph_(eos_.LIQPH),
-    vapph_(eos_.VAPPH) {}
+    vapph_(eos_.VAPPH),
+    mingibbsph_(4) {}  // Phase::mingibbs = 4 in ThermoPack
 
   // 基本信息
   int LIQPH() const { return liqph_; }
   int VAPPH() const { return vapph_; }
+  int MINGIBBSPH() const { return mingibbsph_; }  // 自动选择Gibbs能最低的根
 
   // -------- 1) d(ln phi)/dn：来自 ThermoPack 的公开导数 --------
   // x = n/sum(n)；调用 TP: thermo(T,P,x,phase, ..., dlnfugdn=true).dn()
@@ -149,10 +151,65 @@ public:
   void wilsonK(double T, double P, std::vector<double>& K) const{
     eos_.wilsonK(T, P, K);
   }
+
+  // -------- 6) 逸度系数 φ：从化学势计算 --------
+  // ln(φ_i) = μ_i/(RT) - ln(x_i) - ln(P)
+  std::vector<double> lnFugacityCoefficients(double T, double P,
+                                              const std::vector<double>& n_or_x,
+                                              int phase) const
+  {
+    auto nx = normalize_n(n_or_x);
+    const auto& x = nx.first;
+    const size_t nc = x.size();
+
+    // 获取化学势
+    auto mu = chemicalPotentials(T, P, n_or_x, phase);
+
+    const double RT = R_CONST * T;
+    std::vector<double> lnphi(nc);
+
+    for (size_t i = 0; i < nc; ++i) {
+      // ln(φ_i) = μ_i/(RT) - ln(x_i) - ln(P)
+      // 注意：P的单位需要与化学势一致，ThermoPack使用Pa
+      lnphi[i] = mu[i] / RT - std::log(std::max(x[i], 1e-300)) - std::log(P);
+    }
+
+    return lnphi;
+  }
+
+  // -------- 7) 逸度系数 φ（非对数形式）--------
+  std::vector<double> fugacityCoefficients(double T, double P,
+                                            const std::vector<double>& n_or_x,
+                                            int phase) const
+  {
+    auto lnphi = lnFugacityCoefficients(T, P, n_or_x, phase);
+    std::vector<double> phi(lnphi.size());
+    for (size_t i = 0; i < lnphi.size(); ++i) {
+      phi[i] = std::exp(lnphi[i]);
+    }
+    return phi;
+  }
+
+  // -------- 8) 压缩因子 Z = PVm/(RT) --------
+  double compressibilityFactor(double T, double P,
+                               const std::vector<double>& n_or_x,
+                               int phase) const
+  {
+    auto nx = normalize_n(n_or_x);
+    const auto& x = nx.first;
+
+    // 获取摩尔体积 Vm (m³/mol)
+    auto v_prop = eos_.specific_volume(T, P, x, phase);
+    double Vm = v_prop.value();
+
+    // Z = PVm/(RT)
+    return P * Vm / (R_CONST * T);
+  }
+
 private:
   // 直接用 ThermoPack 的 Cubic 封装（构造时已选定 PR/SRK 等）
   Cubic eos_;
-  int liqph_{1}, vapph_{2};
+  int liqph_{1}, vapph_{2}, mingibbsph_{4};
 };
 
 } // namespace rf

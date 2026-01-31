@@ -1,174 +1,152 @@
 #include "RR_vl.hpp"
-
-#include "cluster_manager.hpp"
-#include "component.hpp"
-#include "data_warehouse_type.hpp"
-#include "database_connection_pool_manager.hpp"
-#include "material_object.hpp"
-#include "model_parameter.hpp"
+#include "thermo_backend.hpp"
 
 #include <cmath>
 #include <gtest/gtest.h>
 #include <memory>
+#include <iostream>
 
-using namespace material_object;
-using namespace database;
-
-class DatabaseTest : public ::testing::Test
-{
+// 基础测试类
+class RRFlashTest : public ::testing::Test {
 protected:
-  static void SetUpTestSuite() {
-    if (!is_db_initialized)
-    {
-      std::cout << "Setting up database connection once for all tests...\n";
-      initDatabase();
-    }
+  void SetUp() override {
+    // 测试前准备
   }
 
-  static void TearDownTestSuite() {
-    std::cout << "Cleaning up database connection...\n";
-    // 这里可以添加清理数据库连接的代码（如果需要）
-  }
-
-  static auto isDatabaseInitialized() -> bool { return is_db_initialized; }
-
-private:
-  static bool is_db_initialized;
-  static void initDatabase() {
-    if (!DataManager::getInstance().initDataManager())
-    {
-      std::cout << "DataManager init failed!!!" << '\n';
-      return;
-    }
-
-    if (!DataManager::getInstance().addDataWarehouses(
-            DataWarehouseType::REMOTE_PUBLIC, true))
-    {
-      std::cout << "DatabaseConnectionPoolManager addDataWarehouses "
-                   "REMOTE_PUBLIC failed!!!"
-                << '\n';
-      return;
-    }
-
-    if (!DataManager::getInstance().addDataWarehouses(
-            DataWarehouseType::REMOTE_PRIVATE))
-    {
-      std::cout << "DatabaseConnectionPoolManager addDataWarehouses "
-                   "REMOTE_PRIVATE failed!!!"
-                << '\n';
-      return;
-    }
-
-    is_db_initialized = true;
-    std::cout << "Database initialized successfully.\n";
-  }
-};
-
-class RRFlashTest : public ::DatabaseTest
-{
-protected:
   void TearDown() override {
-    // 清理资源
-    material_object::SubstanceManager::getInstance().clearAllSubstances();
+    // 测试后清理
+  }
+
+  // 辅助函数：验证物料平衡
+  bool checkMassBalance(const std::vector<double>& z,
+                        double beta,
+                        const std::vector<double>& x,
+                        const std::vector<double>& y,
+                        double tolerance = 1e-5) {
+    for (size_t i = 0; i < z.size(); ++i) {
+      double calculated = (1.0 - beta) * x[i] + beta * y[i];
+      if (std::abs(calculated - z[i]) > tolerance) {
+        std::cout << "Mass balance failed for component " << i
+                  << ": z=" << z[i] << ", calculated=" << calculated
+                  << ", error=" << std::abs(calculated - z[i]) << "\n";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // 辅助函数：验证组成归一化
+  bool checkNormalization(const std::vector<double>& composition,
+                          double tolerance = 1e-6) {
+    double sum = 0.0;
+    for (double x : composition) {
+      sum += x;
+    }
+    return std::abs(sum - 1.0) < tolerance;
   }
 };
-auto getManagerCluster(const std::vector<std::string> &substance_list)
-    -> std::shared_ptr<material_object::Cluster> {
-  // 1. 创建带有数据库加载物质的集群
-  auto &substance_manager = material_object::SubstanceManager::getInstance();
-  auto &cluster_manager = material_object::ClusterManager::getInstance();
-  for (const auto &substance_name : substance_list)
 
-  {
-    substance_manager.createSubstanceFromDatabase(
-        substance_name, database::DataWarehouseType::REMOTE_PRIVATE);
+// // 测试1: 基本两相PT闪蒸 - 甲烷/乙烷体系
+// TEST_F(RRFlashTest, PTFlash_Basic) {
+//   // 创建 ThermoPackBackend (PR方程)
+//   std::string components = "C1,C2";  // 甲烷, 乙烷
+//   thermo::ThermoPackBackend thermo(components, "PR", "vdW", "Classic", "Default", false);
+
+//   // 测试条件
+//   double P = 2.0e6;  // 2 MPa
+//   double T = 250.0;  // 250 K
+//   std::vector<double> z = {0.5, 0.5};  // 等摩尔混合物
+
+//   // 创建PTFlash对象
+//   PTFlash flash(P, T, z, thermo);
+
+//   // 执行计算
+//   flash.calculate(ConvergenceMethod::NEWTON_RAPHSON);
+
+//   // 获取结果
+//   double beta = flash.getVaporFraction();
+//   std::vector<double> y = flash.getVapComp();
+//   std::vector<double> x = flash.getLiqComp();
+
+//   // 输出结果
+//   std::cout << "\n=== PTFlash Basic Test ===\n";
+//   std::cout << "T = " << T << " K, P = " << P/1e6 << " MPa\n";
+//   std::cout << "Vapor fraction: " << beta << "\n";
+//   std::cout << "Vapor composition: [" << y[0] << ", " << y[1] << "]\n";
+//   std::cout << "Liquid composition: [" << x[0] << ", " << x[1] << "]\n";
+
+//   // 验证结果
+//   EXPECT_GE(beta, 0.0);
+//   EXPECT_LE(beta, 1.0);
+//   EXPECT_TRUE(checkNormalization(y));
+//   EXPECT_TRUE(checkNormalization(x));
+//   EXPECT_TRUE(checkMassBalance(z, beta, x, y));
+
+//   // 验证轻组分在气相中富集
+//   EXPECT_GT(y[0], x[0]);  // 甲烷在气相中更多
+// }
+
+// // 测试2: 三组分体系PT闪蒸
+// TEST_F(RRFlashTest, PTFlash_ThreeComponent) {
+//   // 甲烷/乙烷/丙烷体系
+//   std::string components = "C1,C2,C3";
+//   thermo::ThermoPackBackend thermo(components, "PR", "vdW", "Classic", "Default", false);
+
+//   double P = 3.0e6;  // 3 MPa
+//   double T = 280.0;  // 280 K
+//   std::vector<double> z = {0.4, 0.35, 0.25};
+
+//   PTFlash flash(P, T, z, thermo);
+//   flash.calculate(ConvergenceMethod::NEWTON_RAPHSON);
+
+//   double beta = flash.getVaporFraction();
+//   std::vector<double> y = flash.getVapComp();
+//   std::vector<double> x = flash.getLiqComp();
+
+//   std::cout << "\n=== PTFlash Three Component Test ===\n";
+//   std::cout << "T = " << T << " K, P = " << P/1e6 << " MPa\n";
+//   std::cout << "Vapor fraction: " << beta << "\n";
+//   std::cout << "Vapor: [" << y[0] << ", " << y[1] << ", " << y[2] << "]\n";
+//   std::cout << "Liquid: [" << x[0] << ", " << x[1] << ", " << x[2] << "]\n";
+
+//   EXPECT_GE(beta, 0.0);
+//   EXPECT_LE(beta, 1.0);
+//   EXPECT_TRUE(checkNormalization(y));
+//   EXPECT_TRUE(checkNormalization(x));
+//   EXPECT_TRUE(checkMassBalance(z, beta, x, y));
+// }
+
+// 测试3: 复杂多组分体系PT闪蒸
+TEST_F(RRFlashTest, PTFlash_MultiComponent) {
+      std::string comps =
+      "N2,CO2,C1,C2,C3,"
+      "iC4,nC4,iC5,nC5,nC6,nC7";
+
+    thermo::ThermoPackBackend backend(
+      comps, "SRK", "vdW", "Classic", "Default", false);
+
+    double T = 295.0;      // K
+    double P = 2.0e6;      // Pa
+    std::vector<double> feed = {
+      0.003, 0.015, 0.55, 0.14, 0.12,
+      0.05, 0.045, 0.03, 0.025, 0.012, 0.01
+    };
+
+    PTFlash flash(P, T, feed, backend);
+    flash.calculate(ConvergenceMethod::NEWTON_RAPHSON);
+    double beta = flash.getVaporFraction();
+    std::vector<double> y = flash.getVapComp();
+    std::vector<double> x = flash.getLiqComp();
+    std::cout << "\n=== PTFlash Multi-Component Test ===\n";
+    std::cout << "T = " << T << " K, P = " << P/1e6 << " MPa\n";
+    std::cout << "Vapor fraction: " << beta << "\n";
+    std::cout << "Vapor composition: ";
+    for (double comp : y) {
+      std::cout << comp << " ";
+    }
+    std::cout << "\nLiquid composition: ";
+    for (double comp : x) {
+      std::cout << comp << " ";
+    }
+    std::cout << "\n";  
   }
-  cluster_manager.createCluster("TestCluster");
-  cluster_manager.addBatchSubstancesToCluster(
-      "TestCluster", substance_manager.getAllSubstances());
-  auto cluster = cluster_manager.getCluster("TestCluster");
-  return cluster;
-}
-std::vector<string> feed1 = {"NITROGEN","CARBON DIOXIDE","METHANE",   "ETHANE",   "PROPANE",
-                             "ISOBUTANE", "n-BUTANE", "ISOPENTANE",
-                             "n-PENTANE", "n-HEXANE", "n-HEPTANE"};
-std::vector<double> composition1 = {0.003,0.015,0.55, 0.14,  0.12,  0.05, 0.045,
-                                    0.03,  0.025, 0.012, 0.01};
-std::vector<string> feed2 = {"METHANE",   "ETHANE",   "PROPANE",
-                              "ISOBUTANE", "n-BUTANE", "ISOPENTANE",
-                              "n-PENTANE", "n-HEXANE", "n-HEPTANE","n-OCTANE"};
-std::vector<double> composition2 = {0.55, 0.16,0.12,0.05,0.04,0.025,0.02,0.015,0.01,0.01};
-TEST_F(RRFlashTest, PTFlash) {
-    auto cluster = getManagerCluster(feed1);
-    property_package::PropertyPackage SRKproperty(SRK, cluster);
-    PTFlash ptflash(2e6, 295, composition1, SRKproperty);
-    ptflash.calculate(ConvergenceMethod::NEWTON_RAPHSON);
-    double temperature = ptflash.getTemperature();
-    double pressure = ptflash.getPressure();
-    double vaporfraction = ptflash.getVaporFraction();
-    std::vector<double> molefraction_vapor = ptflash.getVapComp();
-    std::vector<double> molefraction_liquid = ptflash.getLiqComp();
-    std::cout << "T : " << temperature << " K\n"
-              << "P : " << pressure << " Pa\n"
-              << "vaporfraction " << vaporfraction << "\n";
-    for (size_t i = 0; i < molefraction_vapor.size(); ++i)
-    {
-      std::cout << "组分" << i + 1 << "气相分率: " << molefraction_vapor[i]
-                << "\n";
-    }
-    for (size_t i = 0; i < molefraction_liquid.size(); ++i)
-    {
-      std::cout << "组分" << i + 1 << "液相分率: " << molefraction_liquid[i]
-                << "\n";
-    }
-}
-bool DatabaseTest::is_db_initialized = false;
-
-// TEST_F(RRFlashTest, PVFlash) {
-//   auto cluster = getManagerCluster(feed1);
-//   property_package::PropertyPackage SRKproperty(SRK, cluster);
-//   PVFlash pvflash(5.5E6, 0.8, composition1, SRKproperty);
-//   pvflash.calculate(ConvergenceMethod::HALLEY);
-//   double temperature = pvflash.getTemperature();
-//   double pressure = pvflash.getPressure();
-//   double vaporfraction = pvflash.getVaporFraction();
-//   std::vector<double> molefraction_vapor = pvflash.getVapComp();
-//   std::vector<double> molefraction_liquid = pvflash.getLiqComp();
-//   std::cout << "T : " << temperature << " K\n"
-//             << "P : " << pressure << " Pa\n"
-//             << "vaporfraction " << vaporfraction << "\n";
-//   for (size_t i = 0; i < molefraction_vapor.size(); ++i)
-//   {
-//     std::cout << "组分" << i + 1 << "气相分率: " << molefraction_vapor[i]
-//               << "\n";
-//   }
-//   for (size_t i = 0; i < molefraction_liquid.size(); ++i)
-//   {
-//     std::cout << "组分" << i + 1 << "液相分率: " << molefraction_liquid[i]
-//               << "\n";
-//   }
-// }
-// TEST_F(RRFlashTest, TVFlash) {
-//   auto cluster = getManagerCluster(feed2);
-//   property_package::PropertyPackage SRKproperty(SRK, cluster);
-//   TVFlash tvflash(330, 0.7, composition2, SRKproperty);
-//   tvflash.calculate(ConvergenceMethod::NEWTON_RAPHSON);
-//   double temperature = tvflash.getTemperature();
-//   double pressure = tvflash.getPressure();
-//   double vaporfraction = tvflash.getVaporFraction();
-//   std::vector<double> molefraction_vapor = tvflash.getVapComp();
-//   std::vector<double> molefraction_liquid = tvflash.getLiqComp();
-//   std::cout << "T : " << temperature << " K\n"
-//             << "P : " << pressure << " Pa\n"
-//             << "vaporfraction " << vaporfraction << "\n";
-//   for (size_t i = 0; i < molefraction_vapor.size(); ++i)
-//   {
-//     std::cout << "组分" << i + 1 << "气相分率: " << molefraction_vapor[i]
-//               << "\n";
-//   }
-//   for (size_t i = 0; i < molefraction_liquid.size(); ++i)
-//   {
-//     std::cout << "组分" << i + 1 << "液相分率: " << molefraction_liquid[i]
-//               << "\n";
-//   }
-// }
