@@ -9,6 +9,14 @@ build/
 /out/
 /dist/
 
+.DS_Store
+.vscode/
+.claude/
+.idea/
+.cache/
+*.log
+*.tmp
+
 # Track embedded thermopack libraries
 !external/thermopack/lib/**/*.dylib
 !external/thermopack/lib/**/*.a

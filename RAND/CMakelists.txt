@@ -5,6 +5,7 @@ set(RAND_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_flash.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_init.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_solver.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/element_matrix_builder.cpp
 )
 
 file(GLOB RAND_HEADERS
@@ -77,4 +78,36 @@ target_include_directories(3phase_rand_test
 target_link_libraries(3phase_rand_test
     PRIVATE
       randflash
+)
+
+add_executable(element_matrix_test
+    tests/element_matrix_test.cpp
+)
+
+target_include_directories(element_matrix_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(element_matrix_test
+    PRIVATE
+      randflash
+      GTest::gtest
+      GTest::gtest_main
+)
+
+add_executable(reactive_flash_test
+    tests/reactive_flash_test.cpp
+)
+
+target_include_directories(reactive_flash_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(reactive_flash_test
+    PRIVATE
+      randflash
+      GTest::gtest
 )

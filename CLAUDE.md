@@ -98,6 +98,11 @@ Build options:
 
 **Thermo/** - Thermodynamic property calculations
 - `thermo_backend.hpp`: Abstract `IThermoBackend` interface defining thermodynamic operations
+  - `chemicalPotentials()`, `dmu_dn()`: Chemical potential and derivatives
+  - `fugacityCoefficients()`, `lnFugacityCoefficients()`: Fugacity calculations
+  - `vaporPhaseFlag()`, `liquidPhaseFlag()`: Phase type identifiers
+  - `minGibbsPhaseFlag()`: Auto-select Gibbs-minimum root (ThermoPack `Phase::mingibbs`)
+  - `compressibilityFactor()`: Z = PV/(nRT) for phase type determination
 - `thermopack_adapter.hpp`: `ThermoAdapterTP` wraps ThermoPack's Cubic EOS (PR, SRK)
 - Provides chemical potentials (via `chemical_potential_tv`, ideal + residual), fugacity coefficients, and their derivatives
 - Chemical potential calculation: TP → TV conversion using `specific_volume`, then `chemical_potential_tv` with `PropertyFlag::total`
@@ -132,11 +137,16 @@ Defines the input for flash calculations:
 
 ### MultiFlashResult
 Contains the solution:
-- `beta`: Phase fractions
-- `x`: Phase compositions (matrix: phases × components)
-- `converged`: Convergence status
+- `phases`: Vector of `PhaseContext`, each containing:
+  - `state`: `PhaseState` with T, P, moleNumbers, phaseFlag
+  - `x`: Composition (mole fractions)
+  - `mu`: Chemical potentials
+  - `m`, `M`: Jacobian matrices
+- `success`: Convergence status
 - `iterations`: Number of iterations
-- `mu_reduced`: Reduced chemical potentials
+- `mu_infinity_norm`: Convergence error metric
+- `pressure`, `temperature`: System conditions
+- Convenience methods: `beta(j)`, `n_phase(j)`, `numPhases()`
 
 ### SolveOptions
 Controls solver behavior:
@@ -155,13 +165,38 @@ Controls solver behavior:
 
 ### Multi-Phase Flash Solver
 1. Initialize phase fractions and compositions (via `rand_init.cpp`)
-2. Newton-Raphson iteration on reduced chemical potentials:
+2. Set all phases to use `minGibbsPhaseFlag` (ThermoPack auto-selects stable root)
+3. Newton-Raphson iteration on reduced chemical potentials:
    - Compute Hessian and gradient
    - Fix Hessian positive-definiteness via tangent space projection
    - Solve linear system for Newton step
    - Apply line search with alpha stepping
-3. Check convergence based on reduced chemical potential differences
-4. Return phase fractions, compositions, and convergence status
+4. Check convergence based on reduced chemical potential differences
+5. Post-convergence: Determine actual phase types via compressibility factor (Z > 0.5 → Vapor)
+6. Reorder phases: Vapor → Oil-like liquid → Water-rich liquid
+7. Return phase fractions, compositions, and convergence status
+
+### Reactive Systems Support
+
+The RAND algorithm supports reactive equilibrium through element conservation:
+
+**Element Matrix (A)**: Defines elemental composition of each species
+- A[e][i] = number of atoms of element e in species i
+- Dimensions: E (elements) × C (species)
+- For non-reactive systems: A = identity matrix
+- For reactive systems: A = actual chemical formula matrix
+
+**Conservation Constraints**:
+- Element conservation: ∑_j ∑_i A[e][i] × n_i^(j) = b_e (constant)
+- Replaces species conservation in non-reactive systems
+- Automatically satisfies reaction equilibrium via element potentials
+
+**Example**: Hydrocarbon system (C1, C2, C3)
+```
+       C1   C2   C3
+  C  [  1    2    3  ]   (carbon atoms)
+  H  [  4    6    8  ]   (hydrogen atoms)
+```
 
 ## Code Navigation Tips
 
@@ -182,9 +217,66 @@ Controls solver behavior:
 - New initialization strategies: Add to `rand_init.cpp`
 - New convergence criteria: Modify `checkConvergence()` in `rand_flash.cpp`
 
+### Using Reactive Systems
+
+**Element Matrix Builder** (`RAND/include/element_matrix_builder.hpp`):
+
+```cpp
+#include "element_matrix_builder.hpp"
+
+// Define species by chemical formula
+std::vector<SpeciesFormula> species = {
+    parseFormula("C1", "CH4"),    // Methane
+    parseFormula("C2", "C2H6"),   // Ethane
+    parseFormula("C3", "C3H8")    // Propane
+};
+
+// Build element matrix
+std::vector<std::string> elementNames;
+auto A = buildElementMatrix(species, elementNames);
+// Returns: A[0] = [1, 2, 3] (carbon), A[1] = [4, 6, 8] (hydrogen)
+// elementNames = ["C", "H"]
+
+// Compute element moles from feed composition
+std::vector<double> z = {0.5, 0.3, 0.2};
+auto elementMoles = computeElementMoles(A, z);
+// Returns: [1.7, 5.4] (carbon and hydrogen moles)
+```
+
+**Running Flash with Element Matrix**:
+
+```cpp
+// Setup backend and solver
+auto backend = std::make_unique<ThermoPackBackend>("C1,C2,C3", "PR");
+auto linSolver = ls::createEigenSolver();
+RandFlash flash(*backend, *linSolver);
+
+// Prepare input
+FlashInput input;
+input.temperature = 300.0;  // K
+input.pressure = 1e5;       // Pa
+input.feedMoles = {0.5, 0.3, 0.2};
+
+// IMPORTANT: For reactive systems, MUST disable stability test
+// and manually specify phase count
+SolveOptions options;
+options.enable_stability_test = false;  // Stability analysis not applicable
+options.forced_phase_count = 1;         // Manually specify number of phases
+auto result = flash.solve(input, A, options);
+
+// Element conservation is automatically enforced
+// Verify: computeElementMoles(A, result.phases[j].state.moleNumbers) = elementMoles
+```
+
+**Important Notes for Reactive Systems**:
+- Species moles are NOT conserved; only element moles are conserved
+- Phase stability analysis is NOT applicable (species composition changes via reactions)
+- Must use `enable_stability_test = false` and `forced_phase_count`
+- Some species may not exist initially (generated through reactions)
+
 ## Current Development Status
 
-**Branch**: `feature/multiphase`
+**Branch**: `feature/reaction`
 
 Recent changes:
 - Embedded ThermoPack into project (`external/thermopack/`), eliminating external dependency
@@ -194,6 +286,14 @@ Recent changes:
 - Unified multi-phase interface (removed separate `solveMultiPhase` methods)
 - Improved convergence criteria using reduced chemical potentials
 - Separated initialization logic into `rand_init.cpp`
+- Added `minGibbsPhaseFlag()` to auto-select Gibbs-minimum root during iteration
+- Streamlined `MultiFlashResult` - removed redundant `n_phase`/`beta` fields, data now accessed via `phases`
+- Post-convergence phase type determination using compressibility factor Z
+- **NEW**: Extended RAND algorithm to support reactive systems via element conservation
+- **NEW**: Added element matrix builder (`element_matrix_builder.hpp/cpp`) for chemical formula parsing
+- **NEW**: Implemented reactive system initialization functions (`initializeReactiveSinglePhase`, `initializeReactiveMultiPhase`)
+- **NEW**: Added comprehensive test suite for reactive systems (`reactive_flash_test.cpp`)
+- **NEW**: Element conservation automatically enforced throughout Newton-Raphson iteration
 
 ## Dependencies
 

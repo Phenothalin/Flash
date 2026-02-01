@@ -208,13 +208,30 @@ private:
     const SystemContext& sys,
     double margin = 1e-10) const;
 
-  // 用“相组成猜测”构造满足守恒的初始 n（最小二乘 beta + 行缩放严格守恒）
+  // 用"相组成猜测"构造满足守恒的初始 n（最小二乘 beta + 行缩放严格守恒）
   InitResult initializeFromCompositions(
     const SystemContext& sys,
     int nPhases,
     const std::vector<std::vector<double>>& phaseCompositions,
     const std::vector<int>& phaseFlags,
     double min_phase_moles_ratio = 1e-8) const;
+
+  // ========== Reactive System Initialization ==========
+
+  // 单相反应体系初始化：从元素摩尔数构造可行组成
+  // 使用最小二乘法求解 A·n = b，确保元素守恒
+  InitResult initializeReactiveSinglePhase(
+    const SystemContext& sys,
+    const std::vector<double>& elementMoles,
+    int phaseFlag) const;
+
+  // 多相反应体系初始化：分配元素到各相
+  // 策略：按相型分配初始组成，确保总元素守恒
+  InitResult initializeReactiveMultiPhase(
+    const SystemContext& sys,
+    int numPhases,
+    const std::vector<int>& phaseFlags,
+    const std::vector<double>& elementMoles) const;
 
   // === 【修改 1】通用化 LineSearch ===
   double lineSearch(
