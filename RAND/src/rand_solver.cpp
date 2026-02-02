@@ -347,7 +347,7 @@ MultiFlashResult RandFlash::solveReactive(
     }
 
     // 5) 调用反应体系求解器
-    auto res = solveGeneralReactive(sys, maxIter, tol);
+    auto res = solveGeneral(sys, maxIter, tol, true);  // isReactive=true
 
     // 6) 根据压缩因子确定实际相态
     if (res.success) {
@@ -706,7 +706,8 @@ MultiFlashResult RandFlash::solve(
 MultiFlashResult RandFlash::solveGeneral(
     SystemContext& sys,
     int maxIter,
-    double tol)
+    double tol,
+    bool isReactive)
 {
     MultiFlashResult result;
     result.pressure = sys.pressure;
@@ -812,7 +813,8 @@ MultiFlashResult RandFlash::solveGeneral(
 
             auto conv = checkConvergence(
                 iter + 1, tol, sys.temperature,
-                mus_post, sys.elementMatrix, n_post, sys.feedMoles);
+                mus_post, sys.elementMatrix, n_post, sys.feedMoles,
+                dnPhases, isReactive);
 
             if (conv.converged) {
                 result.success = true;
@@ -833,143 +835,6 @@ MultiFlashResult RandFlash::solveGeneral(
 
     result.success = false;
     result.phases = sys.phases;  // 保存当前状态
-    return result;
-}
-
-// ----------------------------------------------------------------------------------
-// 反应体系求解内核：专用于反应体系的Newton迭代，使用步长收敛判据
-// ----------------------------------------------------------------------------------
-MultiFlashResult RandFlash::solveGeneralReactive(
-    SystemContext& sys,
-    int maxIter,
-    double tol)
-{
-    MultiFlashResult result;
-    result.pressure = sys.pressure;
-    result.temperature = sys.temperature;
-    result.feedComposition = sys.feedMoles;
-
-    const size_t E = sys.elementMatrix.size();
-    const size_t C = sys.feedMoles.size();
-
-    std::vector<double> Acoef, rhs, sol;
-    std::vector<double> Lambda;
-    std::vector<double> deltaBeta;
-    std::vector<std::vector<double>> dnPhases;
-
-    std::cout << "进入反应体系迭代循环 (F=" << sys.phases.size() << "), maxIter = " << maxIter << std::endl;
-
-    // Phase pruning/merge parameters (conservative defaults)
-    const double beta_rel_prune = 1e-14;   // relative to total feed
-    const double beta_abs_prune = 1e-16;   // absolute moles
-    const double l1_merge_tol   = 1e-8;    // merge nearly identical phases
-
-    try {
-        for (int iter = 0; iter < maxIter; ++iter) {
-            size_t F = sys.phases.size();
-            if (F == 0) throw std::runtime_error("No phases in SystemContext");
-
-            std::cout << "\n=== RandFlash Reactive Iter " << (iter + 1) << " ===\n";
-
-            // Allocate/resize per-iteration containers
-            deltaBeta.assign(F, 0.0);
-            dnPhases.assign(F, std::vector<double>(C, 0.0));
-
-            std::vector<std::vector<std::vector<double>>> Ms(F);
-            std::vector<std::vector<double>> mus(F);
-            std::vector<std::vector<double>> nPhases(F);
-
-            // 1) Update chemistry & Hessian fix for each phase
-            for (size_t j = 0; j < F; ++j) {
-                updatePhaseChemistry(sys.phases[j]);
-
-                PhaseFixOptions pfx;
-                pfx.eig_floor = 1e-10;
-                pfx.inv_tol   = 1e-12;
-                fixPhaseHessian(sys.phases[j], pfx);
-
-                Ms[j]     = sys.phases[j].M;
-                mus[j]    = sys.phases[j].mu;
-                nPhases[j]= sys.phases[j].state.moleNumbers;
-            }
-
-            // 2) Assemble & solve global linear system
-            assembleGlobalSystem(
-                sys.temperature,
-                Ms, mus, nPhases,
-                sys.elementMatrix,
-                sys.feedMoles,
-                Acoef, rhs);
-
-            double lin_resid = 0.0;
-            sol = solveGlobalLinearSystem(Acoef, rhs, &lin_resid);
-
-            for (size_t i = E; i < E + F; ++i) {
-                std::cout << "∆β[" << (i - E) << "]=" << sol[i] << "  ";
-            }
-            std::cout << std::endl;
-
-            if (sol.size() != E + F) throw std::runtime_error("Linear solve size mismatch");
-
-            Lambda.assign(sol.begin(), sol.begin() + static_cast<long>(E));
-            for (size_t j = 0; j < F; ++j) deltaBeta[j] = sol[E + j];
-
-            // 3) Back-substitute to obtain dn for each phase
-            backSubstituteDeltas(
-                sys.temperature,
-                sys.elementMatrix,
-                Ms, mus, nPhases,
-                Lambda, deltaBeta,
-                dnPhases);
-
-            // 4) Apply update with line search and constraints
-            std::vector<std::vector<double>> currentNs(F);
-            for (size_t j = 0; j < F; ++j) currentNs[j] = sys.phases[j].state.moleNumbers;
-
-            applyUpdate(sys.temperature, mus, dnPhases, currentNs);
-            for (size_t j = 0; j < F; ++j) sys.phases[j].state.moleNumbers = currentNs[j];
-
-            // 5) Phase pruning/merge after update (handles beta->0 degeneracy)
-            const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
-            if (changed) {
-                std::cout << "[PhasePrune] Active phases changed -> F=" << sys.phases.size() << std::endl;
-            }
-
-            // 6) Recompute mu for convergence check using the UPDATED state
-            F = sys.phases.size();
-            std::vector<std::vector<double>> mus_post(F);
-            std::vector<std::vector<double>> n_post(F);
-            for (size_t j = 0; j < F; ++j) {
-                updatePhaseChemistry(sys.phases[j]);
-                mus_post[j] = sys.phases[j].mu;
-                n_post[j]   = sys.phases[j].state.moleNumbers;
-            }
-
-            // 【关键区别】传递 dnPhases 和 isReactive=true 给收敛判断
-            auto conv = checkConvergence(
-                iter + 1, tol, sys.temperature,
-                mus_post, sys.elementMatrix, n_post, sys.feedMoles,
-                dnPhases, true);  // Pass step size and reactive flag
-
-            if (conv.converged) {
-                result.success = true;
-                result.iterations = iter + 1;
-                result.mu_infinity_norm = conv.max_mu_diff;
-                result.elem_residual_inf = conv.elem_error;
-
-                result.phases = sys.phases;
-                return result;
-            }
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[RandFlash] Exception: " << e.what() << std::endl;
-        result.success = false;
-        result.phases = sys.phases;
-        return result;
-    }
-
-    result.success = false;
-    result.phases = sys.phases;
     return result;
 }
 

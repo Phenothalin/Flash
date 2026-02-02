@@ -306,17 +306,12 @@ private:
 
   // === 【新增】通用求解内核 ===
   // 所有的 Newton 迭代逻辑移到这里；solve() / solveTwoPhase() 只是包装。
+  // isReactive: 是否为反应体系（影响收敛判据）
   MultiFlashResult solveGeneral(
     SystemContext& sys,
     int maxIterations,
-    double tolerance);
-
-  // === 【新增】反应体系求解内核 ===
-  // 专用于反应体系的Newton迭代，使用步长收敛判据
-  MultiFlashResult solveGeneralReactive(
-    SystemContext& sys,
-    int maxIterations,
-    double tolerance);
+    double tolerance,
+    bool isReactive = false);
 
   // === 内部驱动：给定相数组合猜测 + 相型，完成初始化 + solveGeneral + 结果相序稳定化 ===
   MultiFlashResult solveWithPhaseGuesses(

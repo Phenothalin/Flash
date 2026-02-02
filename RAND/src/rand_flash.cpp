@@ -779,7 +779,7 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   // 1) 化学势平衡判据 (加入微量组分过滤)
   double max_mu_diff = 0.0;
   // 阈值：如果某组分在某相的摩尔分率低于此值，则忽略其化学势差异
-  const double TRACE_LIMIT = 1e-12;  // Lowered from 1e-12 to detect trace components
+  const double TRACE_LIMIT = 1e-6;  // Original value
 
   if (F > 1) {
     // 预先计算各相的总摩尔数 beta 和摩尔分率 x
