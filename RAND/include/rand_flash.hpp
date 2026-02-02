@@ -146,6 +146,30 @@ public:
     int maxIterations = 50,
     double tolerance = 1e-8);
 
+  // === 反应体系求解接口 ===
+  // 独立的反应体系求解入口，内部调用反应体系初始化
+  // 参数：
+  //   - input: 温度、压力、进料组成
+  //   - elementMatrix: 元素矩阵 A[e][i]
+  //   - numPhases: 指定相数
+  //   - maxIterations, tolerance: 收敛控制
+  MultiFlashResult solveReactive(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    int numPhases,
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+
+  // === 反应体系自动相数判断接口 ===
+  // 顺序相添加法：从单相开始，逐步尝试添加新相，直到Gibbs能不再降低
+  // 适用于反应体系，自动确定最优相数
+  MultiFlashResult solveReactiveAuto(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    int maxPhases = 3,
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+
   // 保持旧接口用于兼容性测试
   FlashResult solveTwoPhase(
     const FlashInput& input,
@@ -161,9 +185,10 @@ public:
   // - 提供 initialPhaseCompositions：按给定相数组合做初始化并求解
       
   struct ConvergenceInfo {
-    double max_mu_diff;   
-    double elem_error;    
-    bool   converged;     
+    double max_mu_diff = 0.0;
+    double elem_error = 0.0;
+    double relative_step_norm = 0.0;  // New: relative step norm for single-phase reactive systems
+    bool   converged = false;
   };
 
   void printResult(const MultiFlashResult& res) const;
@@ -275,11 +300,20 @@ private:
     const std::vector<std::vector<double>>& mus,
     const std::vector<std::vector<double>>& elementMatrix,
     const std::vector<std::vector<double>>& nPhases,
-    const std::vector<double>& feedComposition) const;
+    const std::vector<double>& feedComposition,
+    const std::vector<std::vector<double>>& dnPhases = {},  // New: step size for convergence check
+    bool isReactive = false) const;                          // New: flag for reactive systems
 
   // === 【新增】通用求解内核 ===
   // 所有的 Newton 迭代逻辑移到这里；solve() / solveTwoPhase() 只是包装。
   MultiFlashResult solveGeneral(
+    SystemContext& sys,
+    int maxIterations,
+    double tolerance);
+
+  // === 【新增】反应体系求解内核 ===
+  // 专用于反应体系的Newton迭代，使用步长收敛判据
+  MultiFlashResult solveGeneralReactive(
     SystemContext& sys,
     int maxIterations,
     double tolerance);
@@ -292,6 +326,21 @@ private:
     const std::vector<int>& phaseFlags,
     int maxIterations,
     double tolerance);
+
+  // === Helper methods for automatic phase number determination ===
+
+  // Compute total Gibbs free energy: G = sum_j sum_i n_i^(j) * mu_i^(j)
+  double computeTotalGibbs(const SystemContext& sys) const;
+
+  // Generate trial compositions for phase splitting
+  std::vector<std::vector<double>> generateTrialCompositions(
+    const SystemContext& sys, int numTrials = 10) const;
+
+  // Check if phase splitting reduces Gibbs energy
+  bool checkPhaseSplitBenefit(
+    const SystemContext& sys,
+    const std::vector<double>& trialComposition,
+    double currentGibbs, double& newGibbs) const;
 };
 
 } // namespace randflash

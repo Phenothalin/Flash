@@ -271,12 +271,13 @@ MultiFlashResult RandFlash::solveWithPhaseGuesses(
     sys.elementMatrix = elementMatrix;
     sys.phases.resize(F);
 
-    // 2) 由相组成猜测构造严格守恒的 n
-    auto init = initializeFromCompositions(sys, F, phaseCompositions, phaseFlags);
+    // 2) 非反应体系初始化：使用物质守恒初始化
+    InitResult init = initializeFromCompositions(sys, F, phaseCompositions, phaseFlags);
+    std::cout << "[Init] Initialized " << F << " phases with Least-Squares + Strict Element Scaling.\n";
+
     for (int j = 0; j < F; ++j) {
         sys.phases[j].state = {input.temperature, input.pressure, init.n_phases[j], phaseFlags[j]};
     }
-    std::cout << "[Init] Initialized " << F << " phases with Least-Squares + Strict Element Scaling.\n";
 
     // 3) 核心求解
     auto res = solveGeneral(sys, maxIter, tol);
@@ -292,6 +293,74 @@ MultiFlashResult RandFlash::solveWithPhaseGuesses(
         const int water_idx = find_water_index(thermo_, input.feedMoles.size());
         reorder_flash_result(res, vap, water_idx);
     }
+    return res;
+}
+
+// ----------------------------------------------------------------------------------
+// 反应体系求解接口：独立的反应体系求解入口
+// ----------------------------------------------------------------------------------
+MultiFlashResult RandFlash::solveReactive(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    int numPhases,
+    int maxIter,
+    double tol)
+{
+    const size_t C = input.feedMoles.size();
+    const size_t E = elementMatrix.size();
+
+    if (numPhases < 1) {
+        throw std::invalid_argument("solveReactive: numPhases must be at least 1");
+    }
+
+    // 1) 计算元素摩尔数
+    std::vector<double> elementMoles(E, 0.0);
+    for (size_t e = 0; e < E; ++e) {
+        for (size_t i = 0; i < C; ++i) {
+            elementMoles[e] += elementMatrix[e][i] * input.feedMoles[i];
+        }
+    }
+
+    // 2) 构建系统上下文
+    SystemContext sys;
+    sys.temperature = input.temperature;
+    sys.pressure = input.pressure;
+    sys.feedMoles = input.feedMoles;
+    sys.elementMatrix = elementMatrix;
+    sys.phases.resize(numPhases);
+
+    // 3) 反应体系初始化
+    std::vector<int> phaseFlags(numPhases, thermo_.minGibbsPhaseFlag());
+    InitResult init;
+
+    if (numPhases == 1) {
+        init = initializeReactiveSinglePhase(sys, elementMoles, phaseFlags[0]);
+        std::cout << "[Init] Initialized 1 phase with Reactive Element Conservation.\n";
+    } else {
+        init = initializeReactiveMultiPhase(sys, numPhases, phaseFlags, elementMoles);
+        std::cout << "[Init] Initialized " << numPhases << " phases with Reactive Element Conservation.\n";
+    }
+
+    // 4) 填充相状态
+    for (int j = 0; j < numPhases; ++j) {
+        sys.phases[j].state = {input.temperature, input.pressure, init.n_phases[j], phaseFlags[j]};
+    }
+
+    // 5) 调用反应体系求解器
+    auto res = solveGeneralReactive(sys, maxIter, tol);
+
+    // 6) 根据压缩因子确定实际相态
+    if (res.success) {
+        determine_phase_types(res, thermo_);
+    }
+
+    // 7) 结果相序稳定化（Vapor -> (Oil-like) -> (Water-like)）
+    if (res.success && res.phases.size() == sys.phases.size()) {
+        const int vap = thermo_.vaporPhaseFlag();
+        const int water_idx = find_water_index(thermo_, input.feedMoles.size());
+        reorder_flash_result(res, vap, water_idx);
+    }
+
     return res;
 }
 
@@ -766,4 +835,235 @@ MultiFlashResult RandFlash::solveGeneral(
     result.phases = sys.phases;  // 保存当前状态
     return result;
 }
+
+// ----------------------------------------------------------------------------------
+// 反应体系求解内核：专用于反应体系的Newton迭代，使用步长收敛判据
+// ----------------------------------------------------------------------------------
+MultiFlashResult RandFlash::solveGeneralReactive(
+    SystemContext& sys,
+    int maxIter,
+    double tol)
+{
+    MultiFlashResult result;
+    result.pressure = sys.pressure;
+    result.temperature = sys.temperature;
+    result.feedComposition = sys.feedMoles;
+
+    const size_t E = sys.elementMatrix.size();
+    const size_t C = sys.feedMoles.size();
+
+    std::vector<double> Acoef, rhs, sol;
+    std::vector<double> Lambda;
+    std::vector<double> deltaBeta;
+    std::vector<std::vector<double>> dnPhases;
+
+    std::cout << "进入反应体系迭代循环 (F=" << sys.phases.size() << "), maxIter = " << maxIter << std::endl;
+
+    // Phase pruning/merge parameters (conservative defaults)
+    const double beta_rel_prune = 1e-14;   // relative to total feed
+    const double beta_abs_prune = 1e-16;   // absolute moles
+    const double l1_merge_tol   = 1e-8;    // merge nearly identical phases
+
+    try {
+        for (int iter = 0; iter < maxIter; ++iter) {
+            size_t F = sys.phases.size();
+            if (F == 0) throw std::runtime_error("No phases in SystemContext");
+
+            std::cout << "\n=== RandFlash Reactive Iter " << (iter + 1) << " ===\n";
+
+            // Allocate/resize per-iteration containers
+            deltaBeta.assign(F, 0.0);
+            dnPhases.assign(F, std::vector<double>(C, 0.0));
+
+            std::vector<std::vector<std::vector<double>>> Ms(F);
+            std::vector<std::vector<double>> mus(F);
+            std::vector<std::vector<double>> nPhases(F);
+
+            // 1) Update chemistry & Hessian fix for each phase
+            for (size_t j = 0; j < F; ++j) {
+                updatePhaseChemistry(sys.phases[j]);
+
+                PhaseFixOptions pfx;
+                pfx.eig_floor = 1e-10;
+                pfx.inv_tol   = 1e-12;
+                fixPhaseHessian(sys.phases[j], pfx);
+
+                Ms[j]     = sys.phases[j].M;
+                mus[j]    = sys.phases[j].mu;
+                nPhases[j]= sys.phases[j].state.moleNumbers;
+            }
+
+            // 2) Assemble & solve global linear system
+            assembleGlobalSystem(
+                sys.temperature,
+                Ms, mus, nPhases,
+                sys.elementMatrix,
+                sys.feedMoles,
+                Acoef, rhs);
+
+            double lin_resid = 0.0;
+            sol = solveGlobalLinearSystem(Acoef, rhs, &lin_resid);
+
+            for (size_t i = E; i < E + F; ++i) {
+                std::cout << "∆β[" << (i - E) << "]=" << sol[i] << "  ";
+            }
+            std::cout << std::endl;
+
+            if (sol.size() != E + F) throw std::runtime_error("Linear solve size mismatch");
+
+            Lambda.assign(sol.begin(), sol.begin() + static_cast<long>(E));
+            for (size_t j = 0; j < F; ++j) deltaBeta[j] = sol[E + j];
+
+            // 3) Back-substitute to obtain dn for each phase
+            backSubstituteDeltas(
+                sys.temperature,
+                sys.elementMatrix,
+                Ms, mus, nPhases,
+                Lambda, deltaBeta,
+                dnPhases);
+
+            // 4) Apply update with line search and constraints
+            std::vector<std::vector<double>> currentNs(F);
+            for (size_t j = 0; j < F; ++j) currentNs[j] = sys.phases[j].state.moleNumbers;
+
+            applyUpdate(sys.temperature, mus, dnPhases, currentNs);
+            for (size_t j = 0; j < F; ++j) sys.phases[j].state.moleNumbers = currentNs[j];
+
+            // 5) Phase pruning/merge after update (handles beta->0 degeneracy)
+            const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
+            if (changed) {
+                std::cout << "[PhasePrune] Active phases changed -> F=" << sys.phases.size() << std::endl;
+            }
+
+            // 6) Recompute mu for convergence check using the UPDATED state
+            F = sys.phases.size();
+            std::vector<std::vector<double>> mus_post(F);
+            std::vector<std::vector<double>> n_post(F);
+            for (size_t j = 0; j < F; ++j) {
+                updatePhaseChemistry(sys.phases[j]);
+                mus_post[j] = sys.phases[j].mu;
+                n_post[j]   = sys.phases[j].state.moleNumbers;
+            }
+
+            // 【关键区别】传递 dnPhases 和 isReactive=true 给收敛判断
+            auto conv = checkConvergence(
+                iter + 1, tol, sys.temperature,
+                mus_post, sys.elementMatrix, n_post, sys.feedMoles,
+                dnPhases, true);  // Pass step size and reactive flag
+
+            if (conv.converged) {
+                result.success = true;
+                result.iterations = iter + 1;
+                result.mu_infinity_norm = conv.max_mu_diff;
+                result.elem_residual_inf = conv.elem_error;
+
+                result.phases = sys.phases;
+                return result;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[RandFlash] Exception: " << e.what() << std::endl;
+        result.success = false;
+        result.phases = sys.phases;
+        return result;
+    }
+
+    result.success = false;
+    result.phases = sys.phases;
+    return result;
+}
+
+// ----------------------------------------------------------------------------------
+// 反应体系自动相数判断接口：顺序相添加法
+// 从单相开始，逐步尝试添加新相，直到Gibbs能不再降低
+// ----------------------------------------------------------------------------------
+MultiFlashResult RandFlash::solveReactiveAuto(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    int maxPhases,
+    int maxIterations,
+    double tolerance)
+{
+    if (maxPhases < 1) {
+        throw std::invalid_argument("maxPhases must be at least 1");
+    }
+
+    const size_t C = input.feedMoles.size();
+    const size_t E = elementMatrix.size();
+
+    // Compute element moles from feed composition
+    std::vector<double> elementMoles(E, 0.0);
+    for (size_t e = 0; e < E; ++e) {
+        for (size_t i = 0; i < C; ++i) {
+            elementMoles[e] += elementMatrix[e][i] * input.feedMoles[i];
+        }
+    }
+
+    std::cout << "\n=== Reactive System Auto Phase Number Determination ===\n";
+    std::cout << "Max phases: " << maxPhases << "\n";
+    std::cout << "Element moles: ";
+    for (double em : elementMoles) std::cout << em << " ";
+    std::cout << "\n\n";
+
+    MultiFlashResult bestResult;
+    double bestGibbs = 1e100;
+    int bestPhaseCount = 1;
+
+    const int mingibbs = thermo_.minGibbsPhaseFlag();
+
+    // Try phase counts from 1 to maxPhases
+    for (int F = 1; F <= maxPhases; ++F) {
+        std::cout << "\n--- Trying F = " << F << " phases ---\n";
+
+        // Setup solve options for forced phase count
+        SolveOptions opt;
+        opt.enable_stability_test = false;
+        opt.forced_phase_count = F;
+        opt.forced_phase_flags.assign(F, mingibbs);
+
+        // Solve with F phases
+        auto result = solve(input, elementMatrix, opt, maxIterations, tolerance);
+
+        if (!result.success) {
+            std::cout << "F = " << F << " failed to converge, stopping.\n";
+            break;
+        }
+
+        // Build SystemContext to compute Gibbs energy
+        SystemContext sys;
+        sys.temperature = input.temperature;
+        sys.pressure = input.pressure;
+        sys.feedMoles = input.feedMoles;
+        sys.elementMatrix = elementMatrix;
+        sys.phases = result.phases;
+
+        // Ensure chemical potentials are computed
+        for (size_t j = 0; j < sys.phases.size(); ++j) {
+            updatePhaseChemistry(sys.phases[j]);
+        }
+
+        double G = computeTotalGibbs(sys);
+        std::cout << "F = " << F << " converged, G_total = " << G << " J\n";
+
+        // Check if this is better than previous
+        if (F == 1 || G < bestGibbs - 1e-6) {
+            // Significant improvement
+            bestGibbs = G;
+            bestResult = result;
+            bestPhaseCount = F;
+            std::cout << "  -> New best solution (ΔG = " << (F > 1 ? bestGibbs - G : 0.0) << ")\n";
+        } else {
+            // No improvement, stop
+            std::cout << "  -> No improvement (ΔG = " << (G - bestGibbs) << "), stopping.\n";
+            break;
+        }
+    }
+
+    std::cout << "\n=== Auto Phase Determination Complete ===\n";
+    std::cout << "Optimal phase count: " << bestPhaseCount << "\n";
+    std::cout << "Final Gibbs energy: " << bestGibbs << " J\n\n";
+
+    return bestResult;
+}
+
 } // namespace randflash

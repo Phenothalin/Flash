@@ -117,13 +117,8 @@ TEST_F(ReactiveFlashTest, SinglePhaseElementConservation) {
     input.pressure = 1e5;       // Pa
     input.feedMoles = feedMoles;
 
-    // IMPORTANT: For reactive systems, disable stability test
-    // and manually specify phase count
-    SolveOptions options;
-    options.enable_stability_test = false;
-    options.forced_phase_count = 1;
-
-    auto result = flash.solve(input, A, options, 50, 1e-8);
+    // Use new solveReactive() interface for reactive systems
+    auto result = flash.solveReactive(input, A, 1, 50, 1e-8);
 
     std::cout << "Iterations: " << result.iterations << std::endl;
     EXPECT_TRUE(result.success) << "Flash calculation failed";
@@ -149,8 +144,8 @@ TEST_F(ReactiveFlashTest, TwoPhaseElementConservation) {
     std::vector<std::string> elementNames;
     auto A = buildElementMatrix(species, elementNames);
 
-    // Feed composition
-    std::vector<double> feedMoles = {0.6, 0.3, 0.1};
+    // Feed composition (same as TwoPhaseDifferentiatedInit for consistency)
+    std::vector<double> feedMoles = {0.5, 0.3, 0.2};
     auto elementMoles = computeElementMoles(A, feedMoles);
 
     std::cout << "Initial element moles: C=" << elementMoles[0]
@@ -160,18 +155,14 @@ TEST_F(ReactiveFlashTest, TwoPhaseElementConservation) {
     auto backend = std::make_unique<ThermoPackBackend>("C1,C2,C3", "PR");
     RandFlash flash(*backend, *linSolver);
 
-    // Conditions for two-phase region
+    // Conditions for two-phase region (similar to TwoPhaseDifferentiatedInit)
     FlashInput input;
-    input.temperature = 200.0;  // K (low temp)
-    input.pressure = 3e6;       // Pa (high pressure)
+    input.temperature = 250.0;  // K (two-phase region)
+    input.pressure = 2e6;       // Pa (two-phase region)
     input.feedMoles = feedMoles;
 
-    // Disable stability test, force two phases
-    SolveOptions options;
-    options.enable_stability_test = false;
-    options.forced_phase_count = 2;
-
-    auto result = flash.solve(input, A, options, 50, 1e-8);
+    // Use new solveReactive() interface for reactive systems
+    auto result = flash.solveReactive(input, A, 2, 50, 1e-8);
 
     std::cout << "Iterations: " << result.iterations << std::endl;
     EXPECT_TRUE(result.success) << "Flash calculation failed";
@@ -181,6 +172,183 @@ TEST_F(ReactiveFlashTest, TwoPhaseElementConservation) {
         EXPECT_TRUE(verifyElementConservation(A, result, elementMoles))
             << "Element conservation violated";
         flash.printResult(result);
+    }
+}
+
+// Test 3: Multi-component system with more species
+// Verifies element conservation with 5 hydrocarbon species
+// Note: PR EOS doesn't model chemical reactions, so composition changes
+// are driven by Gibbs energy minimization under element constraints
+TEST_F(ReactiveFlashTest, FiveComponentElementConservation) {
+    // System: C1, C2, C3, nC4, nC5 (5 hydrocarbons)
+    std::vector<SpeciesFormula> species = {
+        parseFormula("C1", "CH4"),
+        parseFormula("C2", "C2H6"),
+        parseFormula("C3", "C3H8"),
+        parseFormula("nC4", "C4H10"),
+        parseFormula("nC5", "C5H12")
+    };
+
+    std::vector<std::string> elementNames;
+    auto A = buildElementMatrix(species, elementNames);
+
+    // Element matrix:
+    //       C1   C2   C3   nC4  nC5
+    // C  [  1    2    3    4    5  ]
+    // H  [  4    6    8   10   12  ]
+
+    // Mixed initial composition (with light components for two-phase region)
+    std::vector<double> feedMoles = {0.3, 0.25, 0.2, 0.15, 0.1};
+
+    // Compute element moles from feed
+    auto elementMoles = computeElementMoles(A, feedMoles);
+    std::cout << "\n=== Test 3: Five Component Element Conservation ===" << std::endl;
+    std::cout << "Initial species moles: [";
+    for (size_t i = 0; i < feedMoles.size(); ++i) {
+        std::cout << feedMoles[i] << (i < feedMoles.size()-1 ? ", " : "");
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "Initial element moles: C=" << elementMoles[0]
+              << ", H=" << elementMoles[1] << std::endl;
+
+    // Setup thermodynamic backend
+    auto backend = std::make_unique<ThermoPackBackend>("C1,C2,C3,nC4,nC5", "PR");
+    RandFlash flash(*backend, *linSolver);
+
+    // Prepare flash input (two-phase region conditions)
+    FlashInput input;
+    input.temperature = 250.0;  // K (two-phase region)
+    input.pressure = 2e6;       // Pa (two-phase region)
+    input.feedMoles = feedMoles;
+
+    // Use new solveReactive() interface for reactive systems
+    auto result = flash.solveReactive(input, A, 2, 50, 1e-8);
+
+    std::cout << "Iterations: " << result.iterations << std::endl;
+    EXPECT_TRUE(result.success) << "Flash calculation failed";
+
+    if (result.success) {
+        // Print final species moles
+        std::cout << "Final species moles: [";
+        for (size_t i = 0; i < result.phases[0].state.moleNumbers.size(); ++i) {
+            std::cout << result.phases[0].state.moleNumbers[i];
+            if (i < result.phases[0].state.moleNumbers.size()-1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
+        printElementMoles(A, elementNames, result);
+        EXPECT_TRUE(verifyElementConservation(A, result, elementMoles))
+            << "Element conservation violated";
+
+        // Check that composition changed (algorithm did work)
+        bool compositionChanged = false;
+        for (size_t i = 0; i < feedMoles.size(); ++i) {
+            double diff = std::abs(result.phases[0].state.moleNumbers[i] - feedMoles[i]);
+            if (diff > 1e-6) {
+                compositionChanged = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(compositionChanged)
+            << "Expected composition to change during equilibration";
+
+        flash.printResult(result);
+    }
+}
+
+// Test 4: Zero mole component generation (Problem 3 fix verification)
+// Verifies that species with zero initial moles can be generated
+TEST_F(ReactiveFlashTest, ZeroMoleComponentGeneration) {
+    // System: C1, C2, C3, nC4, nC5
+    std::vector<SpeciesFormula> species = {
+        parseFormula("C1", "CH4"),
+        parseFormula("C2", "C2H6"),
+        parseFormula("C3", "C3H8"),
+        parseFormula("nC4", "C4H10"),
+        parseFormula("nC5", "C5H12")
+    };
+
+    std::vector<std::string> elementNames;
+    auto A = buildElementMatrix(species, elementNames);
+
+    // Feed: C1 starts at ZERO (should be generated during equilibration)
+    std::vector<double> feedMoles = {0.0, 0.3, 0.2, 0.1, 0.1};
+    auto elementMoles = computeElementMoles(A, feedMoles);
+
+    std::cout << "\n=== Test 4: Zero Mole Component Generation ===" << std::endl;
+    std::cout << "Initial C1 moles: " << feedMoles[0] << " (should be zero)" << std::endl;
+
+    auto backend = std::make_unique<ThermoPackBackend>("C1,C2,C3,nC4,nC5", "PR");
+    RandFlash flash(*backend, *linSolver);
+
+    FlashInput input;
+    input.temperature = 300.0;
+    input.pressure = 1e5;
+    input.feedMoles = feedMoles;
+
+    // Use new solveReactive() interface for reactive systems
+    auto result = flash.solveReactive(input, A, 1, 50, 1e-8);
+
+    EXPECT_TRUE(result.success) << "Flash calculation failed";
+
+    if (result.success) {
+        double final_C1 = result.phases[0].state.moleNumbers[0];
+        std::cout << "Final C1 moles: " << final_C1 << std::endl;
+
+        // C1 should be generated (non-zero)
+        EXPECT_GT(final_C1, 1e-6) << "C1 should be generated from zero initial value";
+
+        EXPECT_TRUE(verifyElementConservation(A, result, elementMoles))
+            << "Element conservation violated";
+    }
+}
+
+// Test 5: Multi-phase differentiated initialization (Problem 1 fix verification)
+// Verifies that two-phase initialization produces different compositions
+TEST_F(ReactiveFlashTest, TwoPhaseDifferentiatedInit) {
+    std::vector<SpeciesFormula> species = {
+        parseFormula("C1", "CH4"),
+        parseFormula("C2", "C2H6"),
+        parseFormula("C3", "C3H8")
+    };
+
+    std::vector<std::string> elementNames;
+    auto A = buildElementMatrix(species, elementNames);
+
+    std::vector<double> feedMoles = {0.5, 0.3, 0.2};
+    auto elementMoles = computeElementMoles(A, feedMoles);
+
+    std::cout << "\n=== Test 5: Two-Phase Differentiated Initialization ===" << std::endl;
+
+    auto backend = std::make_unique<ThermoPackBackend>("C1,C2,C3", "PR");
+    RandFlash flash(*backend, *linSolver);
+
+    FlashInput input;
+    input.temperature = 250.0;  // Two-phase region
+    input.pressure = 2e6;
+    input.feedMoles = feedMoles;
+
+    // Use new solveReactive() interface for reactive systems
+    auto result = flash.solveReactive(input, A, 2, 50, 1e-8);
+
+    EXPECT_TRUE(result.success) << "Flash calculation failed";
+    EXPECT_EQ(result.numPhases(), 2) << "Should have 2 phases";
+    EXPECT_GT(result.iterations, 1) << "Should require more than 1 iteration";
+
+    if (result.success && result.numPhases() == 2) {
+        // Check that phases have different compositions
+        double composition_diff = 0.0;
+        for (size_t i = 0; i < 3; ++i) {
+            double x1 = result.phases[0].x[i];
+            double x2 = result.phases[1].x[i];
+            composition_diff += std::abs(x1 - x2);
+        }
+
+        std::cout << "Composition L1 distance: " << composition_diff << std::endl;
+        EXPECT_GT(composition_diff, 0.01) << "Phases should have different compositions";
+
+        EXPECT_TRUE(verifyElementConservation(A, result, elementMoles))
+            << "Element conservation violated";
     }
 }
 

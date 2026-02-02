@@ -570,38 +570,48 @@ InitResult RandFlash::initializeReactiveSinglePhase(
             ") does not match element matrix rows (" + std::to_string(E) + ")");
     }
 
-    // Solve least-squares problem: min ||n||^2 s.t. A·n = b, n ≥ 0
-    // Using simple approach: start with uniform distribution, then project to satisfy A·n = b
+    // Solve least-squares problem using pseudoinverse: min ||n||^2 s.t. A·n = b, n ≥ 0
+    // Solution: n = A^T (A A^T)^{-1} b (minimum norm solution)
 
     std::vector<double> n(C);
 
-    if (E == C) {
-        // Square system: try direct solve A·n = b
-        // For simplicity, use pseudo-inverse approach via least squares
-        // This is a simplified implementation - could use Eigen for better numerics
+    // Minimum initial mole number to ensure all species can be generated
+    // This must be large enough to prevent the solver from immediately driving it to zero
+    const double MIN_INITIAL_MOLE = 1e-3;
 
-        // Start with uniform guess
-        double total = std::accumulate(elementMoles.begin(), elementMoles.end(), 0.0);
-        for (size_t i = 0; i < C; ++i) {
-            n[i] = total / static_cast<double>(C);
-        }
-    } else {
-        // Underdetermined system (E < C): use minimum norm solution
-        // Start with a feasible guess based on element ratios
-
-        double total = std::accumulate(elementMoles.begin(), elementMoles.end(), 0.0);
-        for (size_t i = 0; i < C; ++i) {
-            n[i] = total / static_cast<double>(C);
+    // Build A A^T matrix (E x E)
+    std::vector<double> AAT(E * E, 0.0);
+    for (size_t e1 = 0; e1 < E; ++e1) {
+        for (size_t e2 = 0; e2 < E; ++e2) {
+            for (size_t i = 0; i < C; ++i) {
+                AAT[e1 * E + e2] += sys.elementMatrix[e1][i] * sys.elementMatrix[e2][i];
+            }
         }
     }
 
-    // Iterative projection to satisfy element conservation
-    // This ensures A·n = b while keeping n ≥ 0
-    const int max_iter = 100;
-    const double tol = 1e-12;
+    // Solve (A A^T) λ = elementMoles for element potentials λ
+    double residual = 0.0;
+    std::vector<double> lambda = linearSolver_.solveDense(E, AAT, elementMoles, &residual);
 
-    for (int iter = 0; iter < max_iter; ++iter) {
-        // Compute current element moles: b_computed = A·n
+    // Compute n = A^T λ (minimum norm solution)
+    for (size_t i = 0; i < C; ++i) {
+        n[i] = 0.0;
+        for (size_t e = 0; e < E; ++e) {
+            n[i] += sys.elementMatrix[e][i] * lambda[e];
+        }
+    }
+
+    // Non-negative projection: ensure all species have minimum positive values
+    // This is critical for reactive systems where species can be generated
+    double min_n = *std::min_element(n.begin(), n.end());
+    if (min_n < MIN_INITIAL_MOLE) {
+        // Shift all values to ensure minimum
+        double shift = MIN_INITIAL_MOLE - min_n;
+        for (double& ni : n) {
+            ni += shift;
+        }
+
+        // Re-scale to satisfy element conservation after shifting
         std::vector<double> b_computed(E, 0.0);
         for (size_t e = 0; e < E; ++e) {
             for (size_t i = 0; i < C; ++i) {
@@ -609,43 +619,27 @@ InitResult RandFlash::initializeReactiveSinglePhase(
             }
         }
 
-        // Check convergence
-        double max_error = 0.0;
+        // Find average scaling factor
+        double scale = 0.0;
+        int count = 0;
         for (size_t e = 0; e < E; ++e) {
-            double error = std::abs(b_computed[e] - elementMoles[e]);
-            max_error = std::max(max_error, error);
-        }
-
-        if (max_error < tol) break;
-
-        // Correction step: adjust n to reduce element error
-        // For each element constraint, distribute the error proportionally
-        for (size_t e = 0; e < E; ++e) {
-            double error = elementMoles[e] - b_computed[e];
-
-            // Find species containing this element
-            double sum_A = 0.0;
-            for (size_t i = 0; i < C; ++i) {
-                if (sys.elementMatrix[e][i] > 1e-10) {
-                    sum_A += sys.elementMatrix[e][i];
-                }
+            if (b_computed[e] > 1e-20 && elementMoles[e] > 1e-20) {
+                scale += elementMoles[e] / b_computed[e];
+                count++;
             }
-
-            if (sum_A > 1e-10) {
-                // Distribute error proportionally to element coefficients
-                for (size_t i = 0; i < C; ++i) {
-                    if (sys.elementMatrix[e][i] > 1e-10) {
-                        n[i] += error * sys.elementMatrix[e][i] / sum_A;
-                        n[i] = std::max(n[i], 1e-20);  // Keep positive
-                    }
-                }
+        }
+        if (count > 0) {
+            scale /= count;
+            for (double& ni : n) {
+                ni *= scale;
+                ni = std::max(ni, MIN_INITIAL_MOLE);
             }
         }
     }
 
-    // Ensure all moles are positive
+    // Final safety check: ensure all moles are positive
     for (double& ni : n) {
-        ni = std::max(ni, 1e-20);
+        ni = std::max(ni, MIN_INITIAL_MOLE);
     }
 
     // Compute total moles and composition
@@ -692,69 +686,149 @@ InitResult RandFlash::initializeReactiveMultiPhase(
             "Element moles size does not match element matrix rows");
     }
 
-    // Strategy: distribute elements among phases based on phase type
-    // For simplicity, start with equal distribution, then use Wilson K for vapor/liquid split
+    // Strategy: For reactive systems, we CANNOT use initializeFromCompositions
+    // because it enforces species conservation (row scaling), which destroys phase differentiation.
+    // Instead:
+    // 1. Compute total element moles
+    // 2. Allocate elements to each phase with different fractions
+    // 3. For each phase independently, solve A·n_j = b_j using least-squares
+    // 4. Use K-value weighted element allocation to create composition differences
+    //    (NOT K-value perturbation on mole numbers, which breaks element conservation)
 
     InitResult result;
     result.n_phases.resize(numPhases);
     result.beta.resize(numPhases);
     result.compositions.resize(numPhases);
 
-    // Total element moles
-    double total_elements = std::accumulate(elementMoles.begin(), elementMoles.end(), 0.0);
-
-    // Initial guess: distribute elements equally among phases
-    std::vector<double> phase_element_fraction(numPhases, 1.0 / numPhases);
-
-    // For each phase, compute initial composition
-    for (int j = 0; j < numPhases; ++j) {
-        // Allocate fraction of elements to this phase
-        std::vector<double> phase_element_moles(E);
-        for (size_t e = 0; e < E; ++e) {
-            phase_element_moles[e] = elementMoles[e] * phase_element_fraction[j];
-        }
-
-        // Create temporary system context for single-phase initialization
-        SystemContext phase_sys = sys;
-
-        // Initialize this phase composition from its element allocation
-        auto phase_init = initializeReactiveSinglePhase(phase_sys, phase_element_moles, phaseFlags[j]);
-
-        result.n_phases[j] = phase_init.n_phases[0];
-        result.beta[j] = phase_init.beta[0];
-        result.compositions[j] = phase_init.compositions[0];
+    // Get Wilson K-values for phase differentiation
+    std::vector<double> K(C, 1.0);
+    thermo_.wilsonK(sys.temperature, sys.pressure, K);
+    for (double& Ki : K) {
+        Ki = std::clamp(Ki, 0.1, 10.0);  // Reasonable bounds
     }
 
-    // Verify total element conservation
-    std::vector<double> total_computed(E, 0.0);
-    for (int j = 0; j < numPhases; ++j) {
-        for (size_t e = 0; e < E; ++e) {
-            for (size_t i = 0; i < C; ++i) {
-                total_computed[e] += sys.elementMatrix[e][i] * result.n_phases[j][i];
-            }
+    // Phase fractions for element allocation (differentiated)
+    std::vector<double> phase_fractions(numPhases);
+    if (numPhases == 2) {
+        phase_fractions[0] = 0.4;  // Vapor-like: less moles
+        phase_fractions[1] = 0.6;  // Liquid-like: more moles
+    } else if (numPhases == 3) {
+        phase_fractions[0] = 0.3;  // Vapor
+        phase_fractions[1] = 0.5;  // Oil-like liquid
+        phase_fractions[2] = 0.2;  // Water-rich or intermediate
+    } else {
+        // General case: equal distribution
+        double frac = 1.0 / numPhases;
+        for (int j = 0; j < numPhases; ++j) {
+            phase_fractions[j] = frac;
         }
     }
 
-    // Scale to match exact element conservation
-    for (size_t e = 0; e < E; ++e) {
-        if (total_computed[e] > 1e-20) {
-            double scale = elementMoles[e] / total_computed[e];
-            // Apply scaling to all phases proportionally
-            for (int j = 0; j < numPhases; ++j) {
+    // Compute element allocations for all phases first, then normalize
+    std::vector<std::vector<double>> phase_element_alloc(numPhases, std::vector<double>(E, 0.0));
+
+    for (int j = 0; j < numPhases; ++j) {
+        for (size_t e = 0; e < E; ++e) {
+            double base_allocation = elementMoles[e] * phase_fractions[j];
+
+            // Apply K-value weighting to element allocation
+            double factor = 1.0;
+            if (j == 0) {
+                // Vapor phase: slightly increase allocation
+                double avg_K = 0.0, sum_A = 0.0;
                 for (size_t i = 0; i < C; ++i) {
                     if (sys.elementMatrix[e][i] > 1e-10) {
-                        result.n_phases[j][i] *= scale;
+                        avg_K += sys.elementMatrix[e][i] * K[i];
+                        sum_A += sys.elementMatrix[e][i];
                     }
                 }
+                if (sum_A > 1e-10) {
+                    avg_K /= sum_A;
+                    factor = std::clamp(0.8 + 0.2 * std::log10(avg_K), 0.5, 1.5);
+                }
+            } else if (j == 1) {
+                // Liquid phase: slightly decrease allocation
+                double avg_K = 0.0, sum_A = 0.0;
+                for (size_t i = 0; i < C; ++i) {
+                    if (sys.elementMatrix[e][i] > 1e-10) {
+                        avg_K += sys.elementMatrix[e][i] * K[i];
+                        sum_A += sys.elementMatrix[e][i];
+                    }
+                }
+                if (sum_A > 1e-10) {
+                    avg_K /= sum_A;
+                    factor = std::clamp(1.2 - 0.2 * std::log10(avg_K), 0.5, 1.5);
+                }
+            }
+            phase_element_alloc[j][e] = base_allocation * factor;
+        }
+    }
+
+    // Normalize allocations so that sum across phases equals total element moles
+    for (size_t e = 0; e < E; ++e) {
+        double sum_alloc = 0.0;
+        for (int j = 0; j < numPhases; ++j) {
+            sum_alloc += phase_element_alloc[j][e];
+        }
+        if (sum_alloc > 1e-20 && elementMoles[e] > 1e-20) {
+            double scale = elementMoles[e] / sum_alloc;
+            for (int j = 0; j < numPhases; ++j) {
+                phase_element_alloc[j][e] *= scale;
             }
         }
     }
 
-    // Recompute beta and compositions after scaling
+    // Solve for each phase independently
+    for (int j = 0; j < numPhases; ++j) {
+        SystemContext phase_sys = sys;
+        auto phase_init = initializeReactiveSinglePhase(phase_sys, phase_element_alloc[j], phaseFlags[j]);
+        result.n_phases[j] = phase_init.n_phases[0];
+    }
+
+    // Final re-scaling to ensure exact element conservation
+    // Compute current total element moles
+    std::vector<double> current_elements(E, 0.0);
+    for (size_t e = 0; e < E; ++e) {
+        for (int j = 0; j < numPhases; ++j) {
+            for (size_t i = 0; i < C; ++i) {
+                current_elements[e] += sys.elementMatrix[e][i] * result.n_phases[j][i];
+            }
+        }
+    }
+
+    // Scale all phases uniformly to match total element moles
+    // Use the average scaling factor across all elements
+    double total_scale = 0.0;
+    int count = 0;
+    for (size_t e = 0; e < E; ++e) {
+        if (current_elements[e] > 1e-20 && elementMoles[e] > 1e-20) {
+            total_scale += elementMoles[e] / current_elements[e];
+            count++;
+        }
+    }
+    if (count > 0) {
+        total_scale /= count;
+        for (int j = 0; j < numPhases; ++j) {
+            for (size_t i = 0; i < C; ++i) {
+                result.n_phases[j][i] *= total_scale;
+                result.n_phases[j][i] = std::max(result.n_phases[j][i], 1e-10);
+            }
+        }
+    }
+
+    // Compute beta and compositions
     for (int j = 0; j < numPhases; ++j) {
         result.beta[j] = std::accumulate(result.n_phases[j].begin(), result.n_phases[j].end(), 0.0);
-        for (size_t i = 0; i < C; ++i) {
-            result.compositions[j][i] = result.n_phases[j][i] / result.beta[j];
+        result.compositions[j].resize(C);
+
+        if (result.beta[j] > 1e-20) {
+            for (size_t i = 0; i < C; ++i) {
+                result.compositions[j][i] = result.n_phases[j][i] / result.beta[j];
+            }
+        } else {
+            // Fallback: uniform composition
+            double uni = 1.0 / C;
+            std::fill(result.compositions[j].begin(), result.compositions[j].end(), uni);
         }
     }
 

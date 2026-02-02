@@ -559,51 +559,51 @@ double RandFlash::lineSearch(
 }
 
 // alpha下限可变版的线搜索：先做可行性裁剪，再检查下降性 （暂无使用）
-static double lineSearchFeasible(
-  const std::vector<double>& nV, const std::vector<double>& nL,
-  const std::vector<double>& dnV, const std::vector<double>& dnL,
-  const std::vector<double>& gV,  const std::vector<double>& gL,
-  double init_alpha, double min_alpha, double shrink)
-{
-  auto maxFeasibleAlpha1 = [](const std::vector<double>& n,
-                              const std::vector<double>& dn){
-      double a = 1.0;
-      for (size_t i = 0; i < n.size(); ++i) {
-          if (dn[i] < 0.0) {
-              // 0.99 给一点余量，避免数值触边
-              a = std::min(a, 0.99 * n[i] / (-dn[i]));
-          }
-      }
-      return a;
-  };
+// static double lineSearchFeasible(
+//   const std::vector<double>& nV, const std::vector<double>& nL,
+//   const std::vector<double>& dnV, const std::vector<double>& dnL,
+//   const std::vector<double>& gV,  const std::vector<double>& gL,
+//   double init_alpha, double min_alpha, double shrink)
+// {
+//   auto maxFeasibleAlpha1 = [](const std::vector<double>& n,
+//                               const std::vector<double>& dn){
+//       double a = 1.0;
+//       for (size_t i = 0; i < n.size(); ++i) {
+//           if (dn[i] < 0.0) {
+//               // 0.99 给一点余量，避免数值触边
+//               a = std::min(a, 0.99 * n[i] / (-dn[i]));
+//           }
+//       }
+//       return a;
+//   };
 
-  // 方向是否下降（对约束自由能）：与 alpha 无关，判一次即可
-  auto dirDot = [&](double scale)->double {
-      (void)scale; // 方向不依赖 alpha，保持接口一致
-      double s = 0.0;
-      for (size_t i=0;i<gV.size();++i) s += dnV[i]*gV[i];
-      for (size_t i=0;i<gL.size();++i) s += dnL[i]*gL[i];
-      return s;
-  };
-  const double dir = dirDot(1.0);
-  const double dir_eps = 1e-12;
-  std::cout << "  descent metric = " << dir << std::endl; 
-  double alpha = init_alpha; // 仍然以 1.0 起步最稳
-  while (alpha > min_alpha) {
-      // 先做“可行性裁剪”，再检查下降性
-      double aV = maxFeasibleAlpha1(nV, dnV);
-      double aL = maxFeasibleAlpha1(nL, dnL);
-      alpha = std::min(alpha, std::min(aV, aL));
+//   // 方向是否下降（对约束自由能）：与 alpha 无关，判一次即可
+//   auto dirDot = [&](double scale)->double {
+//       (void)scale; // 方向不依赖 alpha，保持接口一致
+//       double s = 0.0;
+//       for (size_t i=0;i<gV.size();++i) s += dnV[i]*gV[i];
+//       for (size_t i=0;i<gL.size();++i) s += dnL[i]*gL[i];
+//       return s;
+//   };
+//   const double dir = dirDot(1.0);
+//   const double dir_eps = 1e-12;
+//   std::cout << "  descent metric = " << dir << std::endl; 
+//   double alpha = init_alpha; // 仍然以 1.0 起步最稳
+//   while (alpha > min_alpha) {
+//       // 先做“可行性裁剪”，再检查下降性
+//       double aV = maxFeasibleAlpha1(nV, dnV);
+//       double aL = maxFeasibleAlpha1(nL, dnL);
+//       alpha = std::min(alpha, std::min(aV, aL));
 
-      if (alpha <= min_alpha) break;
+//       if (alpha <= min_alpha) break;
 
-      bool descent = (dir < -dir_eps) ? true : (std::abs(dir) <= dir_eps);
-      if (descent) return alpha;
+//       bool descent = (dir < -dir_eps) ? true : (std::abs(dir) <= dir_eps);
+//       if (descent) return alpha;
 
-      alpha *= shrink; // 只在不下降时缩步
-  }
-  return min_alpha;
-}
+//       alpha *= shrink; // 只在不下降时缩步
+//   }
+//   return min_alpha;
+// }
 
 // 4) 解线性系统：当前的 SVD 解法与残差提示
 std::vector<double> RandFlash::solveGlobalLinearSystem(
@@ -766,7 +766,9 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   const std::vector<std::vector<double>>& mus,
   const std::vector<std::vector<double>>& elementMatrix,
   const std::vector<std::vector<double>>& nPhases, // 注意：这里需要传入 nPhases 或 compositions
-  const std::vector<double>& feedComposition) const
+  const std::vector<double>& feedComposition,
+  const std::vector<std::vector<double>>& dnPhases,  // New: step size for convergence check
+  bool isReactive) const                              // New: flag for reactive systems
 {
   RandFlash::ConvergenceInfo info{};
   const double RT = R_CONST * temperature;
@@ -777,7 +779,7 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   // 1) 化学势平衡判据 (加入微量组分过滤)
   double max_mu_diff = 0.0;
   // 阈值：如果某组分在某相的摩尔分率低于此值，则忽略其化学势差异
-  const double TRACE_LIMIT = 1e-6; 
+  const double TRACE_LIMIT = 1e-12;  // Lowered from 1e-12 to detect trace components
 
   if (F > 1) {
     // 预先计算各相的总摩尔数 beta 和摩尔分率 x
@@ -792,7 +794,7 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
 
     for (size_t j = 1; j < F; ++j) {
         for (size_t i = 0; i < C; ++i) {
-              // 【核心修改】仅当两相中该组分都“显著存在”时，才比较化学势
+              // 【核心修改】仅当两相中该组分都"显著存在"时，才比较化学势
               // 否则，该组分的对数项导致的差异是数值噪音或物理上的不混溶表现
               if (xs[j][i] > TRACE_LIMIT && xs[0][i] > TRACE_LIMIT) {
                   double diff = std::fabs(mus[j][i] - mus[0][i]) / RT;
@@ -818,13 +820,41 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
       elem_err = std::max(elem_err, std::abs(sum_n_ell - sum_feed_ell));
   }
 
-  std::cout << "Iter "<< iternumber <<" | max_mu/RT_diff (filtered): " << max_mu_diff 
-            << " | elem_err: " << elem_err << std::endl;
+  // 3) 计算相对步长范数（用于单相反应体系）
+  double relative_step_norm = 0.0;
+  if (!dnPhases.empty() && dnPhases.size() == F) {
+      double step_norm = 0.0, n_norm = 0.0;
+      for (size_t j = 0; j < F; ++j) {
+          if (j < dnPhases.size() && dnPhases[j].size() == C) {
+              for (size_t i = 0; i < C; ++i) {
+                  step_norm += dnPhases[j][i] * dnPhases[j][i];
+                  n_norm += nPhases[j][i] * nPhases[j][i];
+              }
+          }
+      }
+      relative_step_norm = (n_norm > 1e-20) ? std::sqrt(step_norm / n_norm) : 0.0;
+  }
+
+  std::cout << "Iter "<< iternumber <<" | max_mu/RT_diff (filtered): " << max_mu_diff
+            << " | elem_err: " << elem_err;
+  if (isReactive && F == 1) {
+      std::cout << " | relative_step_norm: " << relative_step_norm;
+  }
+  std::cout << std::endl;
 
   info.max_mu_diff = max_mu_diff;
   info.elem_error  = elem_err;
-  // 稍微放宽一点 elem_err，或者保持 1e-6
-  info.converged   = (max_mu_diff < tol && elem_err < 1e-5); 
+  info.relative_step_norm = relative_step_norm;
+
+  // 收敛判断：
+  // - 单相反应体系：使用步长判据
+  // - 多相或非反应体系：使用化学势差判据
+  if (isReactive && F == 1) {
+      info.converged = (relative_step_norm < tol && elem_err < 1e-5);
+  } else {
+      info.converged = (max_mu_diff < tol && elem_err < 1e-5);
+  }
+
   return info;
 }
 
@@ -945,4 +975,112 @@ void RandFlash::printResult(const MultiFlashResult& res) const {
 
 //     return res;
 // }
+
+// ========== Helper Methods for Automatic Phase Number Determination ==========
+
+// Compute total Gibbs free energy of the system
+// G_total = sum_j sum_i n_i^(j) * mu_i^(j)
+double RandFlash::computeTotalGibbs(const SystemContext& sys) const
+{
+    double G_total = 0.0;
+
+    for (size_t j = 0; j < sys.phases.size(); ++j) {
+        const auto& phase = sys.phases[j];
+
+        // Ensure chemical potentials are available
+        if (phase.mu.size() != phase.state.moleNumbers.size()) {
+            throw std::runtime_error("Chemical potentials not computed for phase " + std::to_string(j));
+        }
+
+        // G_phase = sum_i n_i * mu_i
+        for (size_t i = 0; i < phase.state.moleNumbers.size(); ++i) {
+            G_total += phase.state.moleNumbers[i] * phase.mu[i];
+        }
+    }
+
+    return G_total;
+}
+
+// Generate trial compositions for phase splitting
+// Uses random perturbations and Wilson K-value based compositions
+std::vector<std::vector<double>> RandFlash::generateTrialCompositions(
+    const SystemContext& sys, int numTrials) const
+{
+    const size_t C = sys.feedMoles.size();
+    std::vector<std::vector<double>> trials;
+
+    if (C == 0 || sys.phases.empty()) return trials;
+
+    // Get current phase composition (use first phase as reference)
+    std::vector<double> x_ref = sys.phases[0].x;
+
+    // Normalize reference composition
+    double sum_ref = std::accumulate(x_ref.begin(), x_ref.end(), 0.0);
+    if (sum_ref > 1e-20) {
+        for (double& xi : x_ref) xi /= sum_ref;
+    } else {
+        std::fill(x_ref.begin(), x_ref.end(), 1.0 / C);
+    }
+
+    // Trial 1: Wilson K-value based vapor-like composition
+    std::vector<double> K(C, 1.0);
+    thermo_.wilsonK(sys.temperature, sys.pressure, K);
+
+    std::vector<double> trial_vapor(C);
+    for (size_t i = 0; i < C; ++i) {
+        trial_vapor[i] = x_ref[i] * K[i];
+    }
+    double sum_v = std::accumulate(trial_vapor.begin(), trial_vapor.end(), 0.0);
+    if (sum_v > 1e-20) {
+        for (double& xi : trial_vapor) xi /= sum_v;
+    }
+    trials.push_back(trial_vapor);
+
+    // Trial 2: Wilson K-value based liquid-like composition
+    std::vector<double> trial_liquid(C);
+    for (size_t i = 0; i < C; ++i) {
+        trial_liquid[i] = x_ref[i] / K[i];
+    }
+    double sum_l = std::accumulate(trial_liquid.begin(), trial_liquid.end(), 0.0);
+    if (sum_l > 1e-20) {
+        for (double& xi : trial_liquid) xi /= sum_l;
+    }
+    trials.push_back(trial_liquid);
+
+    // Additional trials: random perturbations
+    for (int t = 2; t < numTrials; ++t) {
+        std::vector<double> trial(C);
+        for (size_t i = 0; i < C; ++i) {
+            // Random perturbation factor between 0.5 and 2.0
+            double factor = 0.5 + 1.5 * (std::rand() % 1000) / 1000.0;
+            trial[i] = x_ref[i] * factor;
+        }
+        double sum_t = std::accumulate(trial.begin(), trial.end(), 0.0);
+        if (sum_t > 1e-20) {
+            for (double& xi : trial) xi /= sum_t;
+        }
+        trials.push_back(trial);
+    }
+
+    return trials;
+}
+
+// Check if splitting current phase with trial composition reduces Gibbs energy
+bool RandFlash::checkPhaseSplitBenefit(
+    const SystemContext& sys,
+    const std::vector<double>& trialComposition,
+    double currentGibbs,
+    double& newGibbs) const
+{
+    // This is a simplified check - a full implementation would:
+    // 1. Create a new system with F+1 phases
+    // 2. Initialize the new phase with trialComposition
+    // 3. Solve the multi-phase equilibrium
+    // 4. Compare Gibbs energies
+
+    // For now, return false as placeholder
+    // Full implementation will be added in solveReactiveAuto
+    newGibbs = currentGibbs;
+    return false;
+}
 
