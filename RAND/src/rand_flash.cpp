@@ -1347,10 +1347,63 @@ MultiFlashResult RandFlash::attemptPhaseAddition(
     compositions.push_back(newPhase.x);
     phaseFlags.push_back(newPhase.phase_flag);
 
-    RAND_DEBUG("[PhaseAddition] Adding new phase (flag={}), total phases: {}",
-               newPhase.phase_flag, compositions.size());
+    size_t newPhaseCount = compositions.size();
 
-    // Solve with the new phase configuration
+    RAND_DEBUG("[PhaseAddition] Adding new phase (flag={}), total phases: {}",
+               newPhase.phase_flag, newPhaseCount);
+
+    // === 方案1：水体系检测与专用初始化 ===
+    // 检测是否为水体系
+    const size_t C = input.feedMoles.size();
+    auto names = thermo_.getComponentNames();
+    int water_idx = -1;
+    for (size_t i = 0; i < std::min(names.size(), C); ++i) {
+        std::string n = names[i];
+        std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+        if (n == "H2O" || n == "WATER" || n.find("H2O") != std::string::npos) {
+            water_idx = static_cast<int>(i);
+            break;
+        }
+    }
+
+    // 计算归一化进料组成
+    double total_feed = std::accumulate(input.feedMoles.begin(), input.feedMoles.end(), 0.0);
+    std::vector<double> z_feed = input.feedMoles;
+    if (total_feed > 1e-20) {
+        for (double& zi : z_feed) zi /= total_feed;
+    }
+
+    double z_water = (water_idx >= 0 && static_cast<size_t>(water_idx) < z_feed.size())
+                     ? z_feed[water_idx] : 0.0;
+    bool is_water_system = (water_idx >= 0 && z_water > 1e-4);
+
+    // 如果是水体系且要添加第三相，使用专用三相水体系初始化
+    if (is_water_system && newPhaseCount == 3) {
+        RAND_DEBUG("[PhaseAddition] Detected water system (water_idx={}, z_water={:.4f}), "
+                   "using specialized three-phase water initialization", water_idx, z_water);
+
+        // 构建 SystemContext
+        SystemContext sys;
+        sys.temperature = input.temperature;
+        sys.pressure = input.pressure;
+        sys.feedMoles = input.feedMoles;
+        sys.elementMatrix = elementMatrix;
+
+        // 使用专用三相水体系初始化
+        auto init = initializeThreePhaseWater(sys);
+
+        // 设置相标识符：0=Vapor, 1=Oil, 2=Aqueous
+        sys.phases.resize(3);
+        sys.phases[0].state = {input.temperature, input.pressure, init.n_phases[0], thermo_.vaporPhaseFlag()};
+        sys.phases[1].state = {input.temperature, input.pressure, init.n_phases[1], thermo_.liquidPhaseFlag()};
+        sys.phases[2].state = {input.temperature, input.pressure, init.n_phases[2], thermo_.liquidPhaseFlag()};
+
+        // 调用通用求解器
+        bool isReactive = !elementMatrix.empty() && elementMatrix.size() < C;
+        return solveGeneral(sys, maxIter, tol, isReactive);
+    }
+
+    // 通用路径：使用 incipient 组成
     return solveWithPhaseGuesses(input, elementMatrix, compositions, phaseFlags, maxIter, tol);
 }
 

@@ -450,6 +450,35 @@ InitResult RandFlash::initializeFromCompositions(
             n_sum[i] += n_temp[j][i];
         }
     }
+    // === 改进：水体系的退化处理 ===
+    // 检测水组分
+    auto names = thermo_.getComponentNames();
+    int water_idx = -1;
+    for (size_t i = 0; i < std::min(names.size(), C); ++i) {
+        std::string n = names[i];
+        std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+        if (n == "H2O" || n == "WATER" || n.find("H2O") != std::string::npos) {
+            water_idx = static_cast<int>(i);
+            break;
+        }
+    }
+
+    // 计算归一化进料（复用已有的 total_feed）
+    std::vector<double> z_feed = sys.feedMoles;
+    if (total_feed > 1e-20) {
+        for (double& zi : z_feed) zi /= total_feed;
+    }
+
+    double z_water = (water_idx >= 0 && static_cast<size_t>(water_idx) < z_feed.size())
+                     ? z_feed[water_idx] : 0.0;
+    bool is_water_system = (water_idx >= 0 && z_water > 1e-4);
+
+    // 获取 Wilson K 值用于智能分配
+    std::vector<double> K(C, 1.0);
+    if (is_water_system) {
+        thermo_.wilsonK(sys.temperature, sys.pressure, K);
+    }
+
     for (size_t i = 0; i < C; ++i) {
         const double target = sys.feedMoles[i];
         const double current = n_sum[i];
@@ -457,8 +486,82 @@ InitResult RandFlash::initializeFromCompositions(
             const double scale = target / current;
             for (int j = 0; j < nPhases; ++j) n_temp[j][i] *= scale;
         } else {
-            // 所有相对该组分都为 0，但进料不为 0：平均分配
-            for (int j = 0; j < nPhases; ++j) n_temp[j][i] = target / static_cast<double>(nPhases);
+            // 所有相对该组分都为 0，但进料不为 0：智能分配
+            if (is_water_system && nPhases >= 2) {
+                // 水体系：根据组分类型和相型智能分配
+                bool is_water_comp = (static_cast<int>(i) == water_idx);
+
+                // 识别各相类型（假设：第0相可能是气相，其余是液相）
+                int vapor_phase = -1;
+                int aqueous_phase = -1;
+                int oil_phase = -1;
+
+                for (int j = 0; j < nPhases; ++j) {
+                    if (j < static_cast<int>(phaseFlags.size())) {
+                        if (phaseFlags[j] == thermo_.vaporPhaseFlag()) {
+                            vapor_phase = j;
+                        } else {
+                            // 液相：根据水含量判断
+                            if (aqueous_phase < 0) {
+                                aqueous_phase = j;  // 第一个液相暂定为水相
+                            } else if (oil_phase < 0) {
+                                oil_phase = j;  // 第二个液相为油相
+                            }
+                        }
+                    }
+                }
+
+                if (is_water_comp) {
+                    // 水组分：主要分配到水相
+                    if (aqueous_phase >= 0) {
+                        n_temp[aqueous_phase][i] = target * 0.95;
+                        // 其他相分配极少量
+                        double remainder = target * 0.05;
+                        int other_count = nPhases - 1;
+                        for (int j = 0; j < nPhases; ++j) {
+                            if (j != aqueous_phase) {
+                                n_temp[j][i] = remainder / other_count;
+                            }
+                        }
+                    } else {
+                        // 没有明确的水相，均分
+                        for (int j = 0; j < nPhases; ++j) {
+                            n_temp[j][i] = target / static_cast<double>(nPhases);
+                        }
+                    }
+                } else {
+                    // 烃类组分：根据 K 值分配
+                    if (vapor_phase >= 0 && oil_phase >= 0) {
+                        // 有气相和油相：根据 K 值分配
+                        double K_i = K[i];
+                        if (K_i > 1.5) {
+                            // 易挥发组分：主要到气相
+                            n_temp[vapor_phase][i] = target * 0.7;
+                            n_temp[oil_phase][i] = target * 0.3;
+                            if (aqueous_phase >= 0) {
+                                n_temp[aqueous_phase][i] = target * 1e-5;  // 极少量
+                            }
+                        } else {
+                            // 重组分：主要到油相
+                            n_temp[oil_phase][i] = target * 0.8;
+                            n_temp[vapor_phase][i] = target * 0.2;
+                            if (aqueous_phase >= 0) {
+                                n_temp[aqueous_phase][i] = target * 1e-5;
+                            }
+                        }
+                    } else {
+                        // 没有明确的相型，均分
+                        for (int j = 0; j < nPhases; ++j) {
+                            n_temp[j][i] = target / static_cast<double>(nPhases);
+                        }
+                    }
+                }
+            } else {
+                // 非水体系或单相：平均分配
+                for (int j = 0; j < nPhases; ++j) {
+                    n_temp[j][i] = target / static_cast<double>(nPhases);
+                }
+            }
         }
     }
 

@@ -522,14 +522,6 @@ MultiFlashResult RandFlash::solve(
     int maxIter,
     double tol)
 {
-    // === 路由到稳定法 ===
-    if (opt.phase_determination_strategy == "stable" &&
-        opt.enable_stability_test &&
-        opt.initial_phase_compositions.empty() &&
-        !opt.is_reactive) {
-        return solveStable(input, elementMatrix, opt, maxIter, tol);
-    }
-
     // === 新增：反应体系路由 ===
     if (opt.is_reactive) {
         if (opt.auto_phase_count) {
@@ -545,6 +537,15 @@ MultiFlashResult RandFlash::solve(
         }
     }
 
+
+    // === 路由到稳定法 ===
+    if (opt.phase_determination_strategy == "stable" &&
+        opt.enable_stability_test &&
+        opt.initial_phase_compositions.empty() &&
+        !opt.is_reactive) {
+        return solveStable(input, elementMatrix, opt, maxIter, tol);
+    }
+    
     // === 原有非反应体系逻辑 ===
     const int vap = thermo_.vaporPhaseFlag();
     const int liq = thermo_.liquidPhaseFlag();

@@ -223,6 +223,56 @@ TEST_F(StableMethodTest, LowTemperatureVLE) {
               << result.numPhases() << " phases at T=" << input.temperature << "K" << std::endl;
 }
 
+// Test 8: 含水三相体系（VLLE）- 验证水体系专用初始化
+TEST_F(StableMethodTest, WaterSystemVLLE) {
+    // 重新创建水体系的热力学后端
+    backend = std::make_unique<thermo::ThermoPackBackend>("H2O,C1,nC6", "PR");
+    flash = std::make_unique<RandFlash>(*backend, *linSolver);
+
+    // 单位元素矩阵（非反应体系）
+    std::vector<std::vector<double>> waterElementMatrix = {
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0}
+    };
+
+    FlashInput input;
+    input.temperature = 298.15;  // K - 常温
+    input.pressure = 101325.0;   // Pa - 1 atm
+    input.feedMoles = {0.45, 0.05, 0.50};  // 45% H2O, 5% C1, 50% nC6
+
+    SolveOptions opt;
+    opt.phase_determination_strategy = "stable";
+    opt.enable_stability_test = true;
+    opt.max_stability_iterations = 10;
+    opt.max_phases = 3;
+    opt.verbose_stability_loop = false;
+
+    auto result = flash->solve(input, waterElementMatrix, opt);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.numPhases(), 3);  // 期望得到 VLLE（气相 + 油相 + 水相）
+
+    // 验证相分率合理性
+    double total_beta = 0.0;
+    for (size_t j = 0; j < result.numPhases(); ++j) {
+        total_beta += result.beta(j);
+    }
+    EXPECT_NEAR(total_beta, 1.0, 1e-6);
+
+    std::cout << "Test 8 - Water System VLLE: "
+              << result.numPhases() << " phases (expected 3 for VLLE)" << std::endl;
+
+    // 打印各相组成以验证物理合理性
+    for (size_t j = 0; j < result.numPhases(); ++j) {
+        std::cout << "  Phase " << j << " (beta=" << result.beta(j) << "): ";
+        for (size_t i = 0; i < result.phases[j].x.size(); ++i) {
+            std::cout << result.phases[j].x[i] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
