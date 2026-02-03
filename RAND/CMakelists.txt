@@ -5,6 +5,7 @@ set(RAND_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_flash.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_init.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_solver.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/element_matrix_builder.cpp
 )
 

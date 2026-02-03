@@ -158,12 +158,12 @@ public:
 
   // === 通用接口：自动相稳定性判别 + 初始化 + 相分裂 ===
   // 若 initialPhaseCompositions 非空，则跳过相稳定性分析，按用户给定相数求解。
-  MultiFlashResult solve(
-    const FlashInput& input,
-    const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& initialPhaseCompositions = {},
-    int maxIterations = 50,
-    double tolerance = 1e-8);
+  // MultiFlashResult solve(
+  //   const FlashInput& input,
+  //   const std::vector<std::vector<double>>& elementMatrix,
+  //   const std::vector<std::vector<double>>& initialPhaseCompositions = {},
+  //   int maxIterations = 50,
+  //   double tolerance = 1e-8);
 
   // 新接口：通过 SolveOptions 控制是否执行 stability analysis / 是否强制相数。
   // 说明：
@@ -409,6 +409,56 @@ private:
     const phase_stability::IncipientPhase& newPhase,
     int maxIter,
     double tol);
+
+  // === Architecture refactoring: routing functions ===
+
+  // Reactive system dispatcher
+  MultiFlashResult solveReactiveDispatch(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance);
+
+  // Non-reactive system dispatcher
+  MultiFlashResult solveNonReactiveDispatch(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance);
+
+  // Non-reactive automatic phase determination
+  MultiFlashResult solveNonReactiveAuto(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance);
+
+  // Non-reactive fixed phase count
+  MultiFlashResult solveNonReactiveFixed(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance);
+
+  // Fast strategy (original solve v1 logic)
+  MultiFlashResult solveFast(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance);
+
+  // Default initialization when no user-provided guesses
+  MultiFlashResult solveWithDefaultInit(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance);
 };
 
 } // namespace randflash

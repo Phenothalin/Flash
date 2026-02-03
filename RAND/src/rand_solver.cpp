@@ -1,9 +1,10 @@
 // rand_plan.cpp
 // 负责：相稳定性分析调用、相数/相型规划、求解入口 solve()（驱动初始化与通用求解器）、结果相序重排。
-// 说明：该文件只做“流程编排”，数值内核在 rand_solver.cpp / rand_flash.cpp，初始化在 rand_init.cpp。
+// 说明：该文件只做"流程编排"，数值内核在 rand_solver.cpp / rand_flash.cpp，初始化在 rand_init.cpp。
 
 #include "rand_flash.hpp"
 #include "rand_logger.hpp"
+#include "rand_utils.hpp"
 #include "phase_stability.hpp"
 
 #include <algorithm>
@@ -365,150 +366,21 @@ MultiFlashResult RandFlash::solveReactive(
 // ----------------------------------------------------------------------------------
 // 通用接口：自动相稳定性分析 -> 自动相数选择 -> 自动初始化 -> 相分裂
 // ----------------------------------------------------------------------------------
-MultiFlashResult RandFlash::solve(
-    const FlashInput& input,
-    const std::vector<std::vector<double>>& elementMatrix,
-    const std::vector<std::vector<double>>& initialPhaseCompositions,
-    int maxIter,
-    double tol)
-{
-    // 若用户给了初值，则按给定相数直接求解
-    // 使用minGibbsPhaseFlag让ThermoPack自动选择Gibbs能最低的根
-    if (!initialPhaseCompositions.empty()) {
-        const int F = static_cast<int>(initialPhaseCompositions.size());
-        std::vector<int> flags(F, thermo_.minGibbsPhaseFlag());
-        return solveWithPhaseGuesses(input, elementMatrix, initialPhaseCompositions, flags, maxIter, tol);
-    }
+// MultiFlashResult RandFlash::solve(
+//     const FlashInput& input,
+//     const std::vector<std::vector<double>>& elementMatrix,
+//     const std::vector<std::vector<double>>& initialPhaseCompositions,
+//     int maxIter,
+//     double tol)
+// {
+//     // Create SolveOptions and delegate to the new architecture
+//     SolveOptions opt;
+//     opt.enable_stability_test = true;
+//     opt.initial_phase_compositions = initialPhaseCompositions;
+//     opt.phase_determination_strategy = "fast";  // Use fast strategy for backward compatibility
 
-    // 1) 相稳定性分析
-    phase_stability::PhaseStabilityAnalyzer analyzer(thermo_);
-    phase_stability::StabilityOptions opt;
-    opt.verbose = false;
-
-    auto stab = analyzer.analyze(input.temperature, input.pressure, input.feedMoles, opt);
-    for(const auto& inc : stab.incipient) {
-        RAND_DEBUG("[Stability] Found incipient phase: flag={}, TPD={}, iters={}",
-                  inc.phase_flag, inc.tpd, inc.iters);
-    }
-    // 2) 单相稳定：直接返回（不进入 Rand 迭代）
-    if (stab.stable) {
-        MultiFlashResult result;
-        result.success = true;
-        result.iterations = 0;
-        result.pressure = input.pressure;
-        result.temperature = input.temperature;
-        result.feedComposition = input.feedMoles;
-        result.mu_infinity_norm = 0.0;
-        result.elem_residual_inf = 0.0;
-
-        // 构造单相的PhaseContext，使用analyze中的参考相相态
-        PhaseContext singlePhase;
-        singlePhase.state.Temperature = input.temperature;
-        singlePhase.state.Pressure = input.pressure;
-        singlePhase.state.moleNumbers = input.feedMoles;
-        singlePhase.state.phaseFlag = stab.reference_phase_flag;  // 使用稳定性分析的参考相
-        result.phases = {singlePhase};
-
-        return result;
-    }
-
-    // 3) 根据稳定性结果选择相数与相类型。
-    // 关键约束：对“典型 VLE”体系（一个气相+一个液相）
-    // 稳定性分析可能同时给出 vap 和 liq 的 incipient（数值噪声 / seed 多样性导致），
-    // 但这不应被直接解释为 3 相。3 相仅在“需要两套液相”（LLE/LLV）时启用。
-
-    auto normalize = [&](const std::vector<double>& v) {
-        std::vector<double> x = v;
-        for (double& xi : x) xi = std::max(xi, 1e-14);
-        double s = std::accumulate(x.begin(), x.end(), 0.0);
-        if (s <= 0.0) {
-            const double uni = 1.0 / static_cast<double>(x.size());
-            std::fill(x.begin(), x.end(), uni);
-        } else {
-            for (double& xi : x) xi /= s;
-        }
-        return x;
-    };
-
-    const int vap = thermo_.vaporPhaseFlag();
-    const int liq = thermo_.liquidPhaseFlag();
-    const int mingibbs = thermo_.minGibbsPhaseFlag();
-
-    // Wilson K (用于在 stability 未给出某类 incipient 时构造更“有偏”的相组成初猜)
-    std::vector<double> K(input.feedMoles.size(), 1.0);
-    try {
-        thermo_.wilsonK(input.temperature, input.pressure, K);
-        for (double& Ki : K) Ki = std::clamp(Ki, 1e-12, 1e12);
-    } catch (...) {
-        // fallback: keep K=1
-    }
-
-    auto build_wilson_guess = [&](bool vapor_like) {
-        std::vector<double> x = input.feedMoles;
-        const double s = std::accumulate(x.begin(), x.end(), 0.0);
-        if (s > 0.0) {
-            for (double& xi : x) xi /= s;
-        }
-        for (size_t i = 0; i < x.size(); ++i) {
-            x[i] = vapor_like ? (x[i] * K[i]) : (x[i] / K[i]);
-        }
-        return normalize(x);
-    };
-
-    // 收集 incipient 相
-    std::vector<std::vector<double>> liquid_cands;
-    std::vector<std::vector<double>> vapor_cands;
-    for (const auto& inc : stab.incipient) {
-        if (inc.phase_flag == liq) liquid_cands.push_back(inc.x);
-        if (inc.phase_flag == vap) vapor_cands.push_back(inc.x);
-    }
-
-    // === 基于证据的相数选择策略 ===
-    // 原则：根据稳定性分析结果选择最合适的相数，VLLE优先
-
-    // vapor guess (用于回退场景)
-    std::vector<double> xV = (!vapor_cands.empty()) ? vapor_cands.front() : build_wilson_guess(true);
-    // liquid guess (用于回退场景)
-    std::vector<double> xL = (!liquid_cands.empty()) ? liquid_cands.front() : build_wilson_guess(false);
-
-    // 若 reference 是 vapor 或 liquid，则更倾向于把 z 放在对应相上（更稳健）
-    if (stab.reference_phase_flag == vap) xV = normalize(input.feedMoles);
-    if (stab.reference_phase_flag == liq) xL = normalize(input.feedMoles);
-
-    // === 场景判别 ===
-    const bool is_VLLE = (!vapor_cands.empty()) && (liquid_cands.size() >= 2);
-    const bool is_LLE = (vapor_cands.empty()) && (liquid_cands.size() >= 2);
-
-    // === 场景1: VLLE - 优先尝试3相 ===
-    if (is_VLLE) {
-        std::vector<std::vector<double>> comps3;
-        std::vector<int> flags3 = {vap, liq, liq};
-
-        comps3.push_back(vapor_cands.front());
-        comps3.push_back(liquid_cands[0]);
-        comps3.push_back(liquid_cands[1]);
-
-        auto res3 = solveWithPhaseGuesses(input, elementMatrix, comps3, flags3, maxIter, tol);
-        if (res3.success) return res3;
-
-        // 3相失败，回退到2相VLE
-        std::vector<std::vector<double>> comps2 = { xV, xL };
-        std::vector<int> flags2 = { vap, liq };
-        return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
-    }
-
-    // === 场景2: LLE - 2相液液平衡 ===
-    if (is_LLE) {
-        std::vector<std::vector<double>> comps2 = { liquid_cands[0], liquid_cands[1] };
-        std::vector<int> flags2 = { liq, liq };
-        return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
-    }
-
-    // === 场景3: VLE - 默认2相气液平衡 ===
-    std::vector<std::vector<double>> comps2 = { xV, xL };
-    std::vector<int> flags2 = { vap, liq };
-    return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
-}
+//     return solve(input, elementMatrix, opt, maxIter, tol);
+// }
 
 // ----------------------------------------------------------------------------------
 // 新接口：SolveOptions
@@ -522,171 +394,11 @@ MultiFlashResult RandFlash::solve(
     int maxIter,
     double tol)
 {
-    // === 新增：反应体系路由 ===
+    // Pure routing logic: dispatch to reactive or non-reactive paths
     if (opt.is_reactive) {
-        if (opt.auto_phase_count) {
-            // 自动相数判断
-            return solveReactiveAuto(input, elementMatrix, opt.max_phases, maxIter, tol);
-        } else {
-            // 必须指定相数
-            if (opt.forced_phase_count <= 0) {
-                throw std::invalid_argument(
-                    "Reactive mode requires forced_phase_count > 0 or auto_phase_count = true");
-            }
-            return solveReactive(input, elementMatrix, opt.forced_phase_count, maxIter, tol);
-        }
+        return solveReactiveDispatch(input, elementMatrix, opt, maxIter, tol);
     }
-
-
-    // === 路由到稳定法 ===
-    if (opt.phase_determination_strategy == "stable" &&
-        opt.enable_stability_test &&
-        opt.initial_phase_compositions.empty() &&
-        !opt.is_reactive) {
-        return solveStable(input, elementMatrix, opt, maxIter, tol);
-    }
-    
-    // === 原有非反应体系逻辑 ===
-    const int vap = thermo_.vaporPhaseFlag();
-    const int liq = thermo_.liquidPhaseFlag();
-    const int mingibbs = thermo_.minGibbsPhaseFlag();
-
-    // 0) 若用户给了初始相组成：直接走给定相数（跳过 stability analysis）
-    if (!opt.initial_phase_compositions.empty()) {
-        const int F = static_cast<int>(opt.initial_phase_compositions.size());
-        std::vector<int> flags;
-        if (!opt.forced_phase_flags.empty()) {
-            if (static_cast<int>(opt.forced_phase_flags.size()) != F) {
-                throw std::invalid_argument("SolveOptions: forced_phase_flags size mismatch");
-            }
-            flags = opt.forced_phase_flags;
-        } else {
-            // 默认使用minGibbsPhaseFlag，让ThermoPack自动选择Gibbs能最低的根
-            flags.assign(F, mingibbs);
-        }
-        return solveWithPhaseGuesses(input, elementMatrix, opt.initial_phase_compositions, flags, maxIter, tol);
-    }
-
-    // 1) enable_stability_test=true：保持原逻辑
-    if (opt.enable_stability_test) {
-        return this->solve(input, elementMatrix, std::vector<std::vector<double>>{}, maxIter, tol);
-    }
-
-    // 2) enable_stability_test=false：必须强制相数
-    const int F = opt.forced_phase_count;
-    if (F <= 0) {
-        throw std::invalid_argument("SolveOptions: forced_phase_count must be > 0 when enable_stability_test=false and no initial compositions");
-    }
-
-    // 2.1 phase flags
-    std::vector<int> flags;
-    if (!opt.forced_phase_flags.empty()) {
-        if (static_cast<int>(opt.forced_phase_flags.size()) != F) {
-            throw std::invalid_argument("SolveOptions: forced_phase_flags size mismatch");
-        }
-        flags = opt.forced_phase_flags;
-    } else {
-        // 默认使用minGibbsPhaseFlag
-        flags.assign(F, mingibbs);
-    }
-
-    // 2.2 helpers
-    auto normalize = [&](const std::vector<double>& v) {
-        std::vector<double> x = v;
-        for (double& xi : x) xi = std::max(xi, 1e-14);
-        double s = std::accumulate(x.begin(), x.end(), 0.0);
-        if (s <= 0.0) {
-            const double uni = 1.0 / static_cast<double>(x.size());
-            std::fill(x.begin(), x.end(), uni);
-        } else {
-            for (double& xi : x) xi /= s;
-        }
-        return x;
-    };
-
-    // Wilson K (用于构造 vapor-like / liquid-like 初猜)
-    std::vector<double> K(input.feedMoles.size(), 1.0);
-    try {
-        thermo_.wilsonK(input.temperature, input.pressure, K);
-        for (double& Ki : K) Ki = std::clamp(Ki, 1e-12, 1e12);
-    } catch (...) {
-        // fallback: keep K=1
-    }
-
-    auto build_wilson_guess = [&](bool vapor_like) {
-        std::vector<double> x = input.feedMoles;
-        const double s = std::accumulate(x.begin(), x.end(), 0.0);
-        if (s > 0.0) {
-            for (double& xi : x) xi /= s;
-        }
-        for (size_t i = 0; i < x.size(); ++i) {
-            x[i] = vapor_like ? (x[i] * K[i]) : (x[i] / K[i]);
-        }
-        return normalize(x);
-    };
-
-    auto perturb = [&](const std::vector<double>& base, int k) {
-        std::vector<double> x = base;
-        // deterministic small perturbation to break symmetry
-        const double eps = 1e-3 * static_cast<double>(k + 1);
-        for (size_t i = 0; i < x.size(); ++i) {
-            const double sgn = (i % 2 == 0) ? 1.0 : -1.0;
-            x[i] = std::max(1e-14, x[i] * (1.0 + eps * sgn));
-        }
-        return normalize(x);
-    };
-
-    const std::vector<double> z = normalize(input.feedMoles);
-    const std::vector<double> xV = build_wilson_guess(true);
-    const std::vector<double> xL = build_wilson_guess(false);
-
-    // 2.3 generate phase composition guesses
-    std::vector<std::vector<double>> comps;
-    comps.reserve(F);
-
-    if (F == 1) {
-        // single-phase: use z as a neutral guess (phase flag decided by user / default)
-        comps.push_back(z);
-    } else if (F == 2) {
-        for (int j = 0; j < F; ++j) {
-            comps.push_back(flags[j] == vap ? xV : xL);
-        }
-    } else {
-        // Use existing 3-phase generic initializer to create {V, L1, L2} seeds.
-        SystemContext sys0;
-        sys0.temperature = input.temperature;
-        sys0.pressure = input.pressure;
-        sys0.feedMoles = input.feedMoles;
-        sys0.elementMatrix = elementMatrix;
-
-        auto init3 = initializeThreePhaseGeneric(sys0);
-        const std::vector<double> seedV  = (init3.compositions.size() >= 1) ? init3.compositions[0] : xV;
-        const std::vector<double> seedL1 = (init3.compositions.size() >= 2) ? init3.compositions[1] : xL;
-        const std::vector<double> seedL2 = (init3.compositions.size() >= 3) ? init3.compositions[2] : xL;
-
-        int vap_used = 0;
-        int liq_used = 0;
-        const int liq_count = static_cast<int>(std::count(flags.begin(), flags.end(), liq));
-
-        for (int j = 0; j < F; ++j) {
-            if (flags[j] == vap) {
-                if (vap_used == 0) comps.push_back(seedV);
-                else comps.push_back(perturb(seedV, vap_used));
-                ++vap_used;
-            } else {
-                if (liq_count >= 2) {
-                    if (liq_used == 0) comps.push_back(seedL1);
-                    else if (liq_used == 1) comps.push_back(seedL2);
-                    else comps.push_back(perturb(seedL2, liq_used - 1));
-                } else {
-                    comps.push_back(xL);
-                }
-                ++liq_used;
-            }
-        }
-    }
-
-    return solveWithPhaseGuesses(input, elementMatrix, comps, flags, maxIter, tol);
+    return solveNonReactiveDispatch(input, elementMatrix, opt, maxIter, tol);
 }
 
 MultiFlashResult RandFlash::solveGeneral(
@@ -953,6 +665,295 @@ MultiFlashResult RandFlash::solveReactiveAuto(
     RAND_INFO("Final Gibbs energy: {} J", bestGibbs);
 
     return bestResult;
+}
+
+// ----------------------------------------------------------------------------------
+// Architecture Refactoring: Routing Functions
+// ----------------------------------------------------------------------------------
+
+MultiFlashResult RandFlash::solveReactiveDispatch(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance)
+{
+    if (opt.auto_phase_count || opt.forced_phase_count <= 0) {
+        return solveReactiveAuto(input, elementMatrix, opt.max_phases, maxIterations, tolerance);
+    }
+    return solveReactive(input, elementMatrix, opt.forced_phase_count, maxIterations, tolerance);
+}
+
+MultiFlashResult RandFlash::solveNonReactiveDispatch(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance)
+{
+    // Determine if we should use automatic phase determination
+    bool auto_phase = opt.enable_stability_test &&
+                      opt.initial_phase_compositions.empty() &&
+                      opt.forced_phase_count <= 0;
+
+    if (auto_phase) {
+        return solveNonReactiveAuto(input, elementMatrix, opt, maxIterations, tolerance);
+    }
+    return solveNonReactiveFixed(input, elementMatrix, opt, maxIterations, tolerance);
+}
+
+MultiFlashResult RandFlash::solveNonReactiveAuto(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance)
+{
+    if (opt.phase_determination_strategy == "stable") {
+        return solveStable(input, elementMatrix, opt, maxIterations, tolerance);
+    }
+    return solveFast(input, elementMatrix, opt, maxIterations, tolerance);
+}
+
+MultiFlashResult RandFlash::solveNonReactiveFixed(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance)
+{
+    // User provided initial compositions
+    if (!opt.initial_phase_compositions.empty()) {
+        const int F = static_cast<int>(opt.initial_phase_compositions.size());
+        std::vector<int> flags;
+
+        if (!opt.forced_phase_flags.empty()) {
+            if (static_cast<int>(opt.forced_phase_flags.size()) != F) {
+                throw std::invalid_argument("SolveOptions: forced_phase_flags size mismatch");
+            }
+            flags = opt.forced_phase_flags;
+        } else {
+            // Default: use minGibbsPhaseFlag
+            flags.assign(F, thermo_.minGibbsPhaseFlag());
+        }
+
+        return solveWithPhaseGuesses(input, elementMatrix,
+            opt.initial_phase_compositions, flags, maxIterations, tolerance);
+    }
+
+    // No initial compositions, use default initialization
+    return solveWithDefaultInit(input, elementMatrix, opt, maxIterations, tolerance);
+}
+
+MultiFlashResult RandFlash::solveWithDefaultInit(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance)
+{
+    const int F = opt.forced_phase_count;
+    if (F <= 0) {
+        throw std::invalid_argument(
+            "SolveOptions: forced_phase_count must be > 0 when enable_stability_test=false and no initial compositions");
+    }
+
+    const int vap = thermo_.vaporPhaseFlag();
+    const int liq = thermo_.liquidPhaseFlag();
+    const int mingibbs = thermo_.minGibbsPhaseFlag();
+
+    // Determine phase flags
+    std::vector<int> flags;
+    if (!opt.forced_phase_flags.empty()) {
+        if (static_cast<int>(opt.forced_phase_flags.size()) != F) {
+            throw std::invalid_argument("SolveOptions: forced_phase_flags size mismatch");
+        }
+        flags = opt.forced_phase_flags;
+    } else {
+        // Default: use minGibbsPhaseFlag
+        flags.assign(F, mingibbs);
+    }
+
+    // Get Wilson K-values for composition guesses
+    std::vector<double> K(input.feedMoles.size(), 1.0);
+    try {
+        thermo_.wilsonK(input.temperature, input.pressure, K);
+        for (double& Ki : K) Ki = std::clamp(Ki, 1e-12, 1e12);
+    } catch (...) {
+        // fallback: keep K=1
+    }
+
+    const std::vector<double> z = utils::normalize(input.feedMoles);
+    const std::vector<double> xV = utils::buildWilsonGuess(input.feedMoles, K, true);
+    const std::vector<double> xL = utils::buildWilsonGuess(input.feedMoles, K, false);
+
+    // Generate phase composition guesses
+    std::vector<std::vector<double>> comps;
+    comps.reserve(F);
+
+    if (F == 1) {
+        // Single-phase: use z as neutral guess
+        comps.push_back(z);
+    } else if (F == 2) {
+        // Two-phase: use vapor-like and liquid-like guesses
+        for (int j = 0; j < F; ++j) {
+            comps.push_back(flags[j] == vap ? xV : xL);
+        }
+    } else {
+        // Multi-phase: use three-phase generic initializer
+        SystemContext sys0;
+        sys0.temperature = input.temperature;
+        sys0.pressure = input.pressure;
+        sys0.feedMoles = input.feedMoles;
+        sys0.elementMatrix = elementMatrix;
+
+        auto init3 = initializeThreePhaseGeneric(sys0);
+        const std::vector<double> seedV  = (init3.compositions.size() >= 1) ? init3.compositions[0] : xV;
+        const std::vector<double> seedL1 = (init3.compositions.size() >= 2) ? init3.compositions[1] : xL;
+        const std::vector<double> seedL2 = (init3.compositions.size() >= 3) ? init3.compositions[2] : xL;
+
+        // Perturb function for breaking symmetry
+        auto perturb = [](const std::vector<double>& base, int k) {
+            std::vector<double> x = base;
+            const double eps = 1e-3 * static_cast<double>(k + 1);
+            for (size_t i = 0; i < x.size(); ++i) {
+                const double sgn = (i % 2 == 0) ? 1.0 : -1.0;
+                x[i] = std::max(1e-14, x[i] * (1.0 + eps * sgn));
+            }
+            return utils::normalize(x);
+        };
+
+        int vap_used = 0;
+        int liq_used = 0;
+        const int liq_count = static_cast<int>(std::count(flags.begin(), flags.end(), liq));
+
+        for (int j = 0; j < F; ++j) {
+            if (flags[j] == vap) {
+                if (vap_used == 0) comps.push_back(seedV);
+                else comps.push_back(perturb(seedV, vap_used));
+                ++vap_used;
+            } else {
+                if (liq_count >= 2) {
+                    if (liq_used == 0) comps.push_back(seedL1);
+                    else if (liq_used == 1) comps.push_back(seedL2);
+                    else comps.push_back(perturb(seedL2, liq_used - 1));
+                } else {
+                    comps.push_back(xL);
+                }
+                ++liq_used;
+            }
+        }
+    }
+
+    return solveWithPhaseGuesses(input, elementMatrix, comps, flags, maxIterations, tolerance);
+}
+
+MultiFlashResult RandFlash::solveFast(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations,
+    double tolerance)
+{
+    // Fast strategy: single stability analysis + direct phase splitting
+    // This is the original solve() v1 logic
+
+    // 1) Phase stability analysis
+    phase_stability::PhaseStabilityAnalyzer analyzer(thermo_);
+    phase_stability::StabilityOptions stabOpt;
+    stabOpt.verbose = false;
+
+    auto stab = analyzer.analyze(input.temperature, input.pressure, input.feedMoles, stabOpt);
+    for(const auto& inc : stab.incipient) {
+        RAND_DEBUG("[Stability] Found incipient phase: flag={}, TPD={}, iters={}",
+                  inc.phase_flag, inc.tpd, inc.iters);
+    }
+
+    // 2) Single-phase stable: return immediately
+    if (stab.stable) {
+        MultiFlashResult result;
+        result.success = true;
+        result.iterations = 0;
+        result.pressure = input.pressure;
+        result.temperature = input.temperature;
+        result.feedComposition = input.feedMoles;
+        result.mu_infinity_norm = 0.0;
+        result.elem_residual_inf = 0.0;
+
+        PhaseContext singlePhase;
+        singlePhase.state.Temperature = input.temperature;
+        singlePhase.state.Pressure = input.pressure;
+        singlePhase.state.moleNumbers = input.feedMoles;
+        singlePhase.state.phaseFlag = stab.reference_phase_flag;
+        result.phases = {singlePhase};
+
+        return result;
+    }
+
+    // 3) Multi-phase: scenario classification based on stability results
+    const int vap = thermo_.vaporPhaseFlag();
+    const int liq = thermo_.liquidPhaseFlag();
+
+    // Get Wilson K-values for fallback guesses
+    std::vector<double> K(input.feedMoles.size(), 1.0);
+    try {
+        thermo_.wilsonK(input.temperature, input.pressure, K);
+        for (double& Ki : K) Ki = std::clamp(Ki, 1e-12, 1e12);
+    } catch (...) {
+        // fallback: keep K=1
+    }
+
+    // Collect incipient phases
+    std::vector<std::vector<double>> liquid_cands;
+    std::vector<std::vector<double>> vapor_cands;
+    for (const auto& inc : stab.incipient) {
+        if (inc.phase_flag == liq) liquid_cands.push_back(inc.x);
+        if (inc.phase_flag == vap) vapor_cands.push_back(inc.x);
+    }
+
+    // Vapor and liquid guesses (with fallback to Wilson)
+    std::vector<double> xV = (!vapor_cands.empty()) ?
+        vapor_cands.front() : utils::buildWilsonGuess(input.feedMoles, K, true);
+    std::vector<double> xL = (!liquid_cands.empty()) ?
+        liquid_cands.front() : utils::buildWilsonGuess(input.feedMoles, K, false);
+
+    // If reference phase is vapor or liquid, use feed as that phase
+    if (stab.reference_phase_flag == vap) xV = utils::normalize(input.feedMoles);
+    if (stab.reference_phase_flag == liq) xL = utils::normalize(input.feedMoles);
+
+    // Scenario classification
+    const bool is_VLLE = (!vapor_cands.empty()) && (liquid_cands.size() >= 2);
+    const bool is_LLE = (vapor_cands.empty()) && (liquid_cands.size() >= 2);
+
+    // Scenario 1: VLLE - try 3-phase first
+    if (is_VLLE) {
+        std::vector<std::vector<double>> comps3;
+        std::vector<int> flags3 = {vap, liq, liq};
+
+        comps3.push_back(vapor_cands.front());
+        comps3.push_back(liquid_cands[0]);
+        comps3.push_back(liquid_cands[1]);
+
+        auto res3 = solveWithPhaseGuesses(input, elementMatrix, comps3, flags3, maxIterations, tolerance);
+        if (res3.success) return res3;
+
+        // 3-phase failed, fallback to 2-phase VLE
+        std::vector<std::vector<double>> comps2 = { xV, xL };
+        std::vector<int> flags2 = { vap, liq };
+        return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIterations, tolerance);
+    }
+
+    // Scenario 2: LLE - 2-phase liquid-liquid
+    if (is_LLE) {
+        std::vector<std::vector<double>> comps2 = { liquid_cands[0], liquid_cands[1] };
+        std::vector<int> flags2 = { liq, liq };
+        return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIterations, tolerance);
+    }
+
+    // Scenario 3: VLE - default 2-phase vapor-liquid
+    std::vector<std::vector<double>> comps2 = { xV, xL };
+    std::vector<int> flags2 = { vap, liq };
+    return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIterations, tolerance);
 }
 
 } // namespace randflash
