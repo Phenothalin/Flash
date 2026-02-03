@@ -7,7 +7,7 @@
 #include <iostream>
 
 #include "rand_flash.hpp"
-// #include "thermopack_backend.hpp" // 包含你的实际后端头文件
+#include "rand_logger.hpp"
 
 class MultiSystemFlashTest : public ::testing::Test {
 protected:
@@ -192,6 +192,7 @@ TEST_F(MultiSystemFlashTest, LLE_Water_Hexane) {
 
 // main 函数
 int main(int argc, char **argv) {
+    randflash::setLogLevel(spdlog::level::info);
     ::testing::InitGoogleTest(&argc, argv);
 
     // ::testing::GTEST_FLAG(filter) = "MultiSystemFlashTest.SourGas_H2S_Mix";

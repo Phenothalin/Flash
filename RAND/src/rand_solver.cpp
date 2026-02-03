@@ -522,6 +522,14 @@ MultiFlashResult RandFlash::solve(
     int maxIter,
     double tol)
 {
+    // === 路由到稳定法 ===
+    if (opt.phase_determination_strategy == "stable" &&
+        opt.enable_stability_test &&
+        opt.initial_phase_compositions.empty() &&
+        !opt.is_reactive) {
+        return solveStable(input, elementMatrix, opt, maxIter, tol);
+    }
+
     // === 新增：反应体系路由 ===
     if (opt.is_reactive) {
         if (opt.auto_phase_count) {
@@ -773,11 +781,48 @@ MultiFlashResult RandFlash::solveGeneral(
             applyUpdate(sys.temperature, mus, dnPhases, currentNs);
             for (size_t j = 0; j < F; ++j) sys.phases[j].state.moleNumbers = currentNs[j];
 
-            // 5) Phase pruning/merge after update (handles beta->0 degeneracy)
-            const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
-            if (changed) {
-                RAND_DEBUG("[PhasePrune] Active phases changed -> F={}", sys.phases.size());
+            // 4.5) 基于误差大小的元素守恒投影（统一策略）
+            if (E > 0) {
+                // Compute target element moles from feed
+                std::vector<double> targetElementMoles(E, 0.0);
+                for (size_t e = 0; e < E; ++e) {
+                    for (size_t i = 0; i < C; ++i) {
+                        targetElementMoles[e] += sys.elementMatrix[e][i] * sys.feedMoles[i];
+                    }
+                }
+
+                // Compute current element conservation error
+                std::vector<double> currentElementMoles(E, 0.0);
+                for (size_t e = 0; e < E; ++e) {
+                    for (size_t j = 0; j < F; ++j) {
+                        for (size_t i = 0; i < C; ++i) {
+                            currentElementMoles[e] += sys.elementMatrix[e][i] * currentNs[j][i];
+                        }
+                    }
+                }
+
+                double elem_err = 0.0;
+                for (size_t e = 0; e < E; ++e) {
+                    elem_err = std::max(elem_err, std::abs(currentElementMoles[e] - targetElementMoles[e]));
+                }
+
+                // Apply projection only if error exceeds threshold
+                const double projection_threshold = 1e-10;
+                if (elem_err > projection_threshold) {
+                    RAND_DEBUG("  [Conservation] Element error {:.6e} > threshold, applying projection", elem_err);
+                    projectToElementConservation(sys.elementMatrix, targetElementMoles, currentNs);
+                    for (size_t j = 0; j < F; ++j) sys.phases[j].state.moleNumbers = currentNs[j];
+                }
             }
+
+            // 5) Phase pruning/merge after update (handles beta->0 degeneracy)
+            // 对于反应体系，禁用相合并以保持元素守恒
+            // if (!isReactive) {
+            //     const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
+            //     if (changed) {
+            //         RAND_DEBUG("[PhasePrune] Active phases changed -> F={}", sys.phases.size());
+            //     }
+            // }
 
             // 6) Recompute mu for convergence check using the UPDATED state
             F = sys.phases.size();

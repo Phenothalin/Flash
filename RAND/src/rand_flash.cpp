@@ -690,7 +690,124 @@ void RandFlash::backSubstituteDeltas(
 }
 
 
-// 6) 结果更新：线搜索 + n 的更新与“更新后”打印（逻辑不变）
+// 元素守恒投影：将摩尔数投影回元素守恒约束
+// 使用最小二乘法求解：min ||n - n_current||^2 subject to A*n = b
+void RandFlash::projectToElementConservation(
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<double>& targetElementMoles,
+    std::vector<std::vector<double>>& nPhases_inout) const
+{
+    const size_t E = elementMatrix.size();
+    const size_t C = elementMatrix[0].size();
+    const size_t F = nPhases_inout.size();
+
+    if (E == 0 || C == 0 || F == 0) return;
+
+    // Compute current element moles
+    std::vector<double> currentElementMoles(E, 0.0);
+    for (size_t e = 0; e < E; ++e) {
+        for (size_t j = 0; j < F; ++j) {
+            for (size_t i = 0; i < C; ++i) {
+                currentElementMoles[e] += elementMatrix[e][i] * nPhases_inout[j][i];
+            }
+        }
+    }
+
+    // Compute element error
+    std::vector<double> elementError(E, 0.0);
+    double maxError = 0.0;
+    for (size_t e = 0; e < E; ++e) {
+        elementError[e] = targetElementMoles[e] - currentElementMoles[e];
+        maxError = std::max(maxError, std::abs(elementError[e]));
+    }
+
+    // If error is small enough, no need to project
+    if (maxError < 1e-12) return;
+
+    RAND_DEBUG("  [ElementProjection] Max element error before projection: {:.6e}", maxError);
+
+    // Use least-squares to distribute the error across all phases
+    // For each phase, solve: A * dn = elementError / F (equal distribution)
+    // Then add dn to each phase
+
+    // Simple approach: distribute error proportionally to current phase size
+    std::vector<double> phaseBetas(F, 0.0);
+    double totalBeta = 0.0;
+    for (size_t j = 0; j < F; ++j) {
+        phaseBetas[j] = std::accumulate(nPhases_inout[j].begin(), nPhases_inout[j].end(), 0.0);
+        totalBeta += phaseBetas[j];
+    }
+
+    if (totalBeta < 1e-20) return;
+
+    // For each phase, compute correction: dn_j = A^T * lambda_j
+    // where lambda_j is chosen to satisfy element conservation
+    // Use Moore-Penrose pseudoinverse: dn = A^T * (A*A^T)^{-1} * (error * beta_j / totalBeta)
+
+    for (size_t j = 0; j < F; ++j) {
+        double weight = phaseBetas[j] / totalBeta;
+        std::vector<double> targetError(E);
+        for (size_t e = 0; e < E; ++e) {
+            targetError[e] = elementError[e] * weight;
+        }
+
+        // Solve A * dn = targetError using least-squares
+        // Build A^T * A and A^T * b
+        std::vector<std::vector<double>> ATA(C, std::vector<double>(C, 0.0));
+        std::vector<double> ATb(C, 0.0);
+
+        for (size_t i = 0; i < C; ++i) {
+            for (size_t k = 0; k < C; ++k) {
+                for (size_t e = 0; e < E; ++e) {
+                    ATA[i][k] += elementMatrix[e][i] * elementMatrix[e][k];
+                }
+            }
+            for (size_t e = 0; e < E; ++e) {
+                ATb[i] += elementMatrix[e][i] * targetError[e];
+            }
+        }
+
+        // Add regularization to avoid singularity
+        for (size_t i = 0; i < C; ++i) {
+            ATA[i][i] += 1e-10;
+        }
+
+        // Solve ATA * dn = ATb
+        std::vector<double> dn;
+        try {
+            // Flatten ATA to row-major format
+            std::vector<double> ATA_flat = ls::flattenRowMajor(ATA);
+            dn = linearSolver_.solveSPD(static_cast<int>(C), ATA_flat, ATb);
+        } catch (...) {
+            RAND_DEBUG("  [ElementProjection] Failed to solve for phase {}", j);
+            continue;
+        }
+
+        // Apply correction with clamping
+        const double min_mole_floor = 1e-20;
+        for (size_t i = 0; i < C; ++i) {
+            nPhases_inout[j][i] = std::max(nPhases_inout[j][i] + dn[i], min_mole_floor);
+        }
+    }
+
+    // Verify final error
+    std::vector<double> finalElementMoles(E, 0.0);
+    for (size_t e = 0; e < E; ++e) {
+        for (size_t j = 0; j < F; ++j) {
+            for (size_t i = 0; i < C; ++i) {
+                finalElementMoles[e] += elementMatrix[e][i] * nPhases_inout[j][i];
+            }
+        }
+    }
+
+    double finalMaxError = 0.0;
+    for (size_t e = 0; e < E; ++e) {
+        finalMaxError = std::max(finalMaxError, std::abs(targetElementMoles[e] - finalElementMoles[e]));
+    }
+    RAND_DEBUG("  [ElementProjection] Max element error after projection: {:.6e}", finalMaxError);
+}
+
+// 6) 结果更新：线搜索 + n 的更新与"更新后"打印（逻辑不变）
 void RandFlash::applyUpdate(
   double temperature,
   const std::vector<std::vector<double>>& mus,
@@ -1073,5 +1190,289 @@ bool RandFlash::checkPhaseSplitBenefit(
     // Full implementation will be added in solveReactiveAuto
     newGibbs = currentGibbs;
     return false;
+}
+
+// ========== Stable Phase Determination Methods ==========
+
+// Analyze stability of all phases in a multi-phase system
+RandFlash::MultiPhaseStabilityResult RandFlash::analyzeMultiPhaseStability(
+    const MultiFlashResult& currentResult,
+    const phase_stability::StabilityOptions& stabOpt) const
+{
+    MultiPhaseStabilityResult result;
+    result.globally_stable = true;
+
+    phase_stability::PhaseStabilityAnalyzer analyzer(thermo_);
+
+    // Perform stability analysis on each phase
+    for (size_t j = 0; j < currentResult.numPhases(); ++j) {
+        const auto& phase = currentResult.phases[j];
+        double beta = currentResult.beta(j);
+
+        // Skip phases with negligible amount
+        if (beta < 1e-10) continue;
+
+        // Use phase composition as reference for stability analysis
+        auto stabRes = analyzer.analyze(
+            currentResult.temperature,
+            currentResult.pressure,
+            phase.x,
+            stabOpt);
+
+        if (!stabRes.stable) {
+            result.globally_stable = false;
+
+            // Collect all incipient phases found
+            for (const auto& inc : stabRes.incipient) {
+                result.all_incipients.push_back(inc);
+            }
+        }
+    }
+
+    // Deduplicate incipients based on composition similarity
+    if (!result.all_incipients.empty()) {
+        std::vector<phase_stability::IncipientPhase> unique_incipients;
+        const double l1_threshold = 0.05;  // L1 distance threshold for deduplication
+
+        for (const auto& inc : result.all_incipients) {
+            bool is_duplicate = false;
+
+            for (const auto& existing : unique_incipients) {
+                // Calculate L1 distance
+                double l1_dist = 0.0;
+                for (size_t i = 0; i < inc.x.size(); ++i) {
+                    l1_dist += std::abs(inc.x[i] - existing.x[i]);
+                }
+
+                if (l1_dist < l1_threshold) {
+                    is_duplicate = true;
+                    break;
+                }
+            }
+
+            if (!is_duplicate) {
+                unique_incipients.push_back(inc);
+            }
+        }
+
+        result.all_incipients = unique_incipients;
+
+        // Sort by TPD (most negative first)
+        std::sort(result.all_incipients.begin(), result.all_incipients.end(),
+            [](const phase_stability::IncipientPhase& a, const phase_stability::IncipientPhase& b) {
+                return a.tpd < b.tpd;
+            });
+    }
+
+    return result;
+}
+
+// Select the best incipient phase to add
+// Strategy: prioritize phase type diversity, then TPD magnitude
+phase_stability::IncipientPhase RandFlash::selectBestIncipient(
+    const std::vector<phase_stability::IncipientPhase>& incipients,
+    const MultiFlashResult& currentResult) const
+{
+    if (incipients.empty()) {
+        throw std::runtime_error("selectBestIncipient: no incipients provided");
+    }
+
+    // Collect existing phase flags
+    std::vector<int> existing_flags;
+    for (const auto& phase : currentResult.phases) {
+        double beta = std::accumulate(phase.state.moleNumbers.begin(),
+                                      phase.state.moleNumbers.end(), 0.0);
+        if (beta > 1e-10) {
+            existing_flags.push_back(phase.state.phaseFlag);
+        }
+    }
+
+    const int vap = thermo_.vaporPhaseFlag();
+    const int liq = thermo_.liquidPhaseFlag();
+
+    // Check if we have vapor and liquid phases
+    bool has_vapor = std::find(existing_flags.begin(), existing_flags.end(), vap) != existing_flags.end();
+    bool has_liquid = std::find(existing_flags.begin(), existing_flags.end(), liq) != existing_flags.end();
+
+    // Strategy 1: Prioritize phase type diversity
+    // If we only have liquid phases, prefer adding a vapor phase
+    if (!has_vapor && has_liquid) {
+        for (const auto& inc : incipients) {
+            if (inc.phase_flag == vap) {
+                RAND_DEBUG("[SelectIncipient] Prioritizing vapor phase for diversity (TPD={})", inc.tpd);
+                return inc;
+            }
+        }
+    }
+
+    // If we only have vapor phase, prefer adding a liquid phase
+    if (has_vapor && !has_liquid) {
+        for (const auto& inc : incipients) {
+            if (inc.phase_flag == liq) {
+                RAND_DEBUG("[SelectIncipient] Prioritizing liquid phase for diversity (TPD={})", inc.tpd);
+                return inc;
+            }
+        }
+    }
+
+    // Strategy 2: Select the incipient with most negative TPD
+    // (already sorted by TPD in analyzeMultiPhaseStability)
+    RAND_DEBUG("[SelectIncipient] Selecting incipient with most negative TPD={}", incipients[0].tpd);
+    return incipients[0];
+}
+
+// Attempt to add a new phase to the current result
+MultiFlashResult RandFlash::attemptPhaseAddition(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const MultiFlashResult& currentResult,
+    const phase_stability::IncipientPhase& newPhase,
+    int maxIter,
+    double tol)
+{
+    // Extract existing phase compositions and flags
+    std::vector<std::vector<double>> compositions;
+    std::vector<int> phaseFlags;
+
+    for (const auto& phase : currentResult.phases) {
+        double beta = std::accumulate(phase.state.moleNumbers.begin(),
+                                      phase.state.moleNumbers.end(), 0.0);
+        if (beta > 1e-10) {
+            compositions.push_back(phase.x);
+            phaseFlags.push_back(phase.state.phaseFlag);
+        }
+    }
+
+    // Add the new incipient phase
+    compositions.push_back(newPhase.x);
+    phaseFlags.push_back(newPhase.phase_flag);
+
+    RAND_DEBUG("[PhaseAddition] Adding new phase (flag={}), total phases: {}",
+               newPhase.phase_flag, compositions.size());
+
+    // Solve with the new phase configuration
+    return solveWithPhaseGuesses(input, elementMatrix, compositions, phaseFlags, maxIter, tol);
+}
+
+// Stable phase determination: iterative stability-splitting loop
+MultiFlashResult RandFlash::solveStable(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIter,
+    double tol)
+{
+    RAND_INFO("\n=== Stable Phase Determination Method ===");
+    RAND_INFO("Max stability iterations: {}", opt.max_stability_iterations);
+    RAND_INFO("Max phases: {}", opt.max_phases);
+    RAND_INFO("Gibbs improvement threshold: {} J", opt.gibbs_improvement_threshold);
+
+    // Step 1: Initialize with single phase
+    const int mingibbs = thermo_.minGibbsPhaseFlag();
+    std::vector<std::vector<double>> singlePhaseComp = {input.feedMoles};
+    std::vector<int> singlePhaseFlag = {mingibbs};
+
+    MultiFlashResult currentResult = solveWithPhaseGuesses(
+        input, elementMatrix, singlePhaseComp, singlePhaseFlag, maxIter, tol);
+
+    if (!currentResult.success) {
+        RAND_INFO("Single-phase initialization failed");
+        return currentResult;
+    }
+
+    // Compute initial Gibbs energy
+    SystemContext sys;
+    sys.temperature = input.temperature;
+    sys.pressure = input.pressure;
+    sys.feedMoles = input.feedMoles;
+    sys.elementMatrix = elementMatrix;
+    sys.phases = currentResult.phases;
+
+    for (size_t j = 0; j < sys.phases.size(); ++j) {
+        updatePhaseChemistry(sys.phases[j]);
+    }
+
+    double currentGibbs = computeTotalGibbs(sys);
+    RAND_INFO("Initial single-phase Gibbs: {} J", currentGibbs);
+
+    // Step 2: Iterative stability-splitting loop
+    phase_stability::StabilityOptions stabOpt;
+    stabOpt.verbose = opt.verbose_stability_loop;
+    stabOpt.max_ss_iters = 100;
+    stabOpt.n_random_seeds = 8;
+    stabOpt.tpd_tol = 1e-12;
+
+    for (int iter = 0; iter < opt.max_stability_iterations; ++iter) {
+        if (opt.verbose_stability_loop) {
+            RAND_INFO("\n--- Stability iteration {} ---", iter + 1);
+            RAND_INFO("Current phases: {}, Gibbs: {} J", currentResult.numPhases(), currentGibbs);
+        }
+
+        // Step 2a: Perform stability analysis on all phases
+        auto stabResult = analyzeMultiPhaseStability(currentResult, stabOpt);
+
+        // Step 2b: Check if globally stable
+        if (stabResult.globally_stable) {
+            RAND_INFO("System is globally stable with {} phases", currentResult.numPhases());
+            return currentResult;
+        }
+
+        if (opt.verbose_stability_loop) {
+            RAND_INFO("Found {} incipient phases", stabResult.all_incipients.size());
+        }
+
+        // Step 2c: Check phase number limit
+        if (static_cast<int>(currentResult.numPhases()) >= opt.max_phases) {
+            RAND_INFO("Reached max phases limit ({}), stopping", opt.max_phases);
+            return currentResult;
+        }
+
+        // Step 2d: Select best incipient phase
+        auto incipient = selectBestIncipient(stabResult.all_incipients, currentResult);
+
+        if (opt.verbose_stability_loop) {
+            RAND_INFO("Selected incipient: flag={}, TPD={}", incipient.phase_flag, incipient.tpd);
+        }
+
+        // Step 2e: Attempt to add new phase
+        auto newResult = attemptPhaseAddition(input, elementMatrix, currentResult, incipient, maxIter, tol);
+
+        // Step 2f: Check if phase addition succeeded
+        if (!newResult.success) {
+            RAND_INFO("Phase addition failed to converge, stopping");
+            return currentResult;
+        }
+
+        // Step 2g: Compute new Gibbs energy
+        sys.phases = newResult.phases;
+        for (size_t j = 0; j < sys.phases.size(); ++j) {
+            updatePhaseChemistry(sys.phases[j]);
+        }
+
+        double newGibbs = computeTotalGibbs(sys);
+        double deltaG = currentGibbs - newGibbs;
+
+        if (opt.verbose_stability_loop) {
+            RAND_INFO("New Gibbs: {} J, ΔG: {} J", newGibbs, deltaG);
+        }
+
+        // Step 2h: Check Gibbs improvement
+        if (deltaG < opt.gibbs_improvement_threshold) {
+            RAND_INFO("Gibbs improvement insufficient (ΔG={} < threshold={}), stopping",
+                     deltaG, opt.gibbs_improvement_threshold);
+            return currentResult;
+        }
+
+        // Step 2i: Accept new result
+        currentResult = std::move(newResult);
+        currentGibbs = newGibbs;
+
+        if (opt.verbose_stability_loop) {
+            RAND_INFO("Accepted new configuration with {} phases", currentResult.numPhases());
+        }
+    }
+
+    RAND_INFO("Reached max stability iterations ({})", opt.max_stability_iterations);
+    return currentResult;
 }
 

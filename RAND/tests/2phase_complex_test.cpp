@@ -4,8 +4,10 @@
 #include <memory>
 
 #include "rand_flash.hpp"
+#include "rand_logger.hpp"
 
 int main() {
+  randflash::setLogLevel(spdlog::level::debug);
   try {
     // 1) 构建 ThermoPack 后端：这里用 Peng-Robinson + vdW + Classic alpha
     // 组分顺序要和你的 feed z 保持一致

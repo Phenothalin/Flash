@@ -112,3 +112,19 @@ target_link_libraries(reactive_flash_test
       randflash
       GTest::gtest
 )
+
+add_executable(stable_method_test
+    tests/stable_method_test.cpp
+)
+
+target_include_directories(stable_method_test
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+)
+
+target_link_libraries(stable_method_test
+    PRIVATE
+      randflash
+      GTest::gtest
+)

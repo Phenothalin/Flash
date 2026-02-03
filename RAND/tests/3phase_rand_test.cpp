@@ -79,6 +79,7 @@ int main() {
     int    maxIter = 30;
     double tol     = 1e-8;
     randflash::SolveOptions options;
+    options.phase_determination_strategy = "stable"; // 使用稳定法
     // options.enable_stability_test = false; // 跳过相稳定性分析，直接三相求解
     // options.forced_phase_count = 3;
     // options.initial_phase_compositions = initialComps;

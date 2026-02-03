@@ -3,6 +3,7 @@
 #pragma once
 #include "thermo_backend.hpp"
 #include "linear_solver.hpp"
+#include "phase_stability.hpp"
 #include <vector>
 #include <memory>
 
@@ -58,6 +59,23 @@ struct SolveOptions {
 
   // 自动模式的最大相数（仅当 auto_phase_count=true 时有效）
   int max_phases = 3;
+
+  // === 相数判断策略控制 ===
+
+  // 策略选择: "fast" 或 "stable"
+  // - "fast": 当前行为（一次稳定性分析，直接相分裂）
+  // - "stable": 迭代式稳定性-分裂循环
+  std::string phase_determination_strategy = "stable";  // 默认使用稳定法
+
+  // 稳定法外层循环最大迭代次数
+  int max_stability_iterations = 10;
+
+  // Gibbs 能改善阈值 (J/mol)
+  // 若 ΔG < 阈值，停止添加相
+  double gibbs_improvement_threshold = 1e-3;
+
+  // 调试输出开关
+  bool verbose_stability_loop = false;
 };
 
 struct PhaseFixOptions {
@@ -304,7 +322,14 @@ private:
     const std::vector<std::vector<double>>& mus,
     const std::vector<std::vector<double>>& dnPhases,
     std::vector<std::vector<double>>& nPhases_inout);
-  
+
+  // === 【新增】元素守恒投影 ===
+  // 将摩尔数投影回元素守恒约束（用于反应体系）
+  void projectToElementConservation(
+    const std::vector<std::vector<double>>& elementMatrix,
+    const std::vector<double>& targetElementMoles,
+    std::vector<std::vector<double>>& nPhases_inout) const;
+
   // === 【修改 3】通用化 checkConvergence ===
   ConvergenceInfo checkConvergence(
     int iternumber,
@@ -349,6 +374,41 @@ private:
     const SystemContext& sys,
     const std::vector<double>& trialComposition,
     double currentGibbs, double& newGibbs) const;
+
+  // === Stable phase determination methods ===
+
+  // 多相系统稳定性分析结果
+  struct MultiPhaseStabilityResult {
+    bool globally_stable = true;
+    std::vector<phase_stability::IncipientPhase> all_incipients;
+  };
+
+  // 稳定法主入口
+  MultiFlashResult solveStable(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const SolveOptions& opt,
+    int maxIterations = 50,
+    double tolerance = 1e-8);
+
+  // 对多相系统进行稳定性分析
+  MultiPhaseStabilityResult analyzeMultiPhaseStability(
+    const MultiFlashResult& currentResult,
+    const phase_stability::StabilityOptions& stabOpt) const;
+
+  // 选择最佳候选相
+  phase_stability::IncipientPhase selectBestIncipient(
+    const std::vector<phase_stability::IncipientPhase>& incipients,
+    const MultiFlashResult& currentResult) const;
+
+  // 尝试添加新相
+  MultiFlashResult attemptPhaseAddition(
+    const FlashInput& input,
+    const std::vector<std::vector<double>>& elementMatrix,
+    const MultiFlashResult& currentResult,
+    const phase_stability::IncipientPhase& newPhase,
+    int maxIter,
+    double tol);
 };
 
 } // namespace randflash
