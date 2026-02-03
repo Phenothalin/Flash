@@ -1,11 +1,11 @@
 name: Build Windows Libraries
 
 on:
-  # 手动触发
+  # 手动触发（任何分支都可以）
   workflow_dispatch:
-  # 或者在push到特定分支时触发
+  # push触发
   push:
-    branches: [main, master]
+    branches: [main, master, feature/reaction]
     paths:
       - 'external/thermopack/**'
 
