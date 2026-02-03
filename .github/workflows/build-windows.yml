@@ -1,67 +1,79 @@
 name: Build Windows Libraries
 
 on:
-  # 手动触发（任何分支都可以）
   workflow_dispatch:
-  # push触发
   push:
     branches: [main, master, feature/reaction]
     paths:
-      - 'external/thermopack/**'
+      - '.github/workflows/build-windows.yml'
 
 jobs:
   build-windows:
     runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-      - name: Checkout repository
+      - name: Checkout Flash repository
         uses: actions/checkout@v4
+
+      - name: Clone ThermoPack source
+        run: |
+          git clone https://github.com/thermotools/thermopack.git thermopack-src
+        shell: bash
 
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
+          path-type: inherit
           install: >-
             mingw-w64-x86_64-gcc-fortran
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-lapack
+            mingw-w64-x86_64-openblas
             make
 
-      - name: Check compiler version
+      - name: Check environment
+        shell: msys2 {0}
         run: |
+          echo "=== Compiler versions ==="
+          which gfortran
           gfortran --version
+          which gcc
           gcc --version
+          which cmake
           cmake --version
 
       - name: Build ThermoPack
+        shell: msys2 {0}
         run: |
-          cd external/thermopack
+          cd thermopack-src
           mkdir -p build && cd build
-          cmake .. -G "MinGW Makefiles" \
+          cmake .. -G "Ninja" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON
-          cmake --build . --config Release
+            -DCMAKE_Fortran_COMPILER=gfortran \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++
+          ninja
 
       - name: List built files
+        shell: bash
         run: |
-          echo "=== Build directory contents ==="
-          ls -la external/thermopack/build/
-          echo "=== DLL files ==="
-          find external/thermopack/build -name "*.dll" -o -name "*.lib" -o -name "*.a"
+          echo "=== Build directory ==="
+          find thermopack-src/build -name "*.dll" -o -name "*.lib" -o -name "*.a" 2>/dev/null || true
+          ls -la thermopack-src/build/ || true
 
       - name: Check exported symbols
         shell: pwsh
         run: |
-          $dll = Get-ChildItem -Path "external/thermopack/build" -Filter "*.dll" -Recurse | Select-Object -First 1
+          $dll = Get-ChildItem -Path "thermopack-src/build" -Filter "*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($dll) {
-            Write-Host "Checking symbols in: $($dll.FullName)"
+            Write-Host "=== Symbols in $($dll.Name) ==="
             dumpbin /exports $dll.FullName | Select-String "eos" | Select-Object -First 20
+          } else {
+            Write-Host "No DLL found"
           }
 
       - name: Upload Windows libraries
@@ -69,7 +81,7 @@ jobs:
         with:
           name: thermopack-windows-x64
           path: |
-            external/thermopack/build/*.dll
-            external/thermopack/build/*.lib
-            external/thermopack/build/*.a
+            thermopack-src/build/**/*.dll
+            thermopack-src/build/**/*.lib
+            thermopack-src/build/**/*.a
           if-no-files-found: warn
