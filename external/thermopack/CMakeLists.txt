@@ -12,8 +12,9 @@ if(APPLE)
     set(THERMOPACK_STATIC_LIB ${THERMOPACK_LIB_DIR}/libthermopack.a)
 elseif(WIN32)
     set(THERMOPACK_LIB_DIR ${THERMOPACK_ROOT}/lib/windows)
-    set(THERMOPACK_SHARED_LIB ${THERMOPACK_LIB_DIR}/thermopack.dll)
-    set(THERMOPACK_STATIC_LIB ${THERMOPACK_LIB_DIR}/thermopack.lib)
+    set(THERMOPACK_SHARED_LIB ${THERMOPACK_LIB_DIR}/libthermopack.dll)
+    set(THERMOPACK_STATIC_LIB ${THERMOPACK_LIB_DIR}/libthermopack.a)
+    set(THERMOPACK_IMPLIB ${THERMOPACK_LIB_DIR}/libthermopack.dll.a)
 elseif(UNIX)
     set(THERMOPACK_LIB_DIR ${THERMOPACK_ROOT}/lib/linux)
     set(THERMOPACK_SHARED_LIB ${THERMOPACK_LIB_DIR}/libthermopack.so)
@@ -37,6 +38,13 @@ set_target_properties(thermopack PROPERTIES
     IMPORTED_LOCATION ${THERMOPACK_LIB}
     INTERFACE_INCLUDE_DIRECTORIES ${THERMOPACK_INCLUDE}
 )
+
+# Windows: 设置导入库
+if(WIN32 AND NOT THERMOPACK_USE_STATIC)
+    set_target_properties(thermopack PROPERTIES
+        IMPORTED_IMPLIB ${THERMOPACK_IMPLIB}
+    )
+endif()
 
 # macOS: 链接 Accelerate framework (LAPACK/BLAS)
 if(APPLE)

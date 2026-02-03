@@ -1,11 +1,8 @@
 name: Build Windows Libraries
 
 on:
+  # 仅手动触发
   workflow_dispatch:
-  push:
-    branches: [main, master, feature/reaction]
-    paths:
-      - '.github/workflows/build-windows.yml'
 
 jobs:
   build-windows:
