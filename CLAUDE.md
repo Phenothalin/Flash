@@ -1,54 +1,54 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为Claude Code (claude.ai/code)在处理本仓库代码时提供指导。
 
-## Project Overview
+## 项目概述
 
-Flash is a C++17 thermodynamic flash calculation engine for multi-phase equilibrium computations. It solves Gibbs free energy minimization problems for multi-component, multi-phase systems using Newton-Raphson iteration with line search.
+Flash是一个C++17热力学闪蒸计算引擎，用于多相平衡计算。它使用Newton-Raphson迭代和线搜索求解多组分、多相系统的Gibbs自由能最小化问题。
 
-## Build System
+## 构建系统
 
-### Prerequisites
+### 环境准备
 
-Set this environment variable before building:
+构建前需设置以下环境变量：
 
 ```bash
 export VCPKG_ROOT=/path/to/vcpkg
 ```
 
-Note: ThermoPack is now embedded in the project under `external/thermopack/`, so `THERMOPACK_DIR` is no longer required.
+注意：ThermoPack现已内嵌于项目的`external/thermopack/`目录下，不再需要设置`THERMOPACK_DIR`。
 
-### Build Commands
+### 构建命令
 
 ```bash
-# Configure and build
+# 配置和构建
 cd /Users/madao/code/Flash
 mkdir -p build && cd build
 cmake ..
 make
 
-# Build specific target
+# 构建特定目标
 make <target_name>
 
-# Clean build
+# 清理构建
 rm -rf build && mkdir build && cd build && cmake .. && make
 ```
 
-### Available Targets
+### 可用构建目标
 
-- `thermo` - Thermodynamic backend library
-- `phase_stability` - Phase stability analysis library
-- `randflash` - Main flash solver library
-- `compressibility_factor_test` - EOS validation test
-- `tp_thermo_check` - ThermoPack integration test
-- `2phase_tests` - Two-phase flash GTest suite
-- `2phase_complex_test` - Complex two-phase scenarios
-- `3phase_rand_test` - Three-phase flash test
+- `thermo` - 热力学后端库
+- `phase_stability` - 相稳定性分析库
+- `randflash` - 主闪蒸求解器库
+- `compressibility_factor_test` - 状态方程验证测试
+- `tp_thermo_check` - ThermoPack集成测试
+- `2phase_tests` - 两相闪蒸GTest测试套件
+- `2phase_complex_test` - 复杂两相场景测试
+- `3phase_rand_test` - 三相闪蒸测试
 
-### Running Tests
+### 运行测试
 
 ```bash
-# From build directory
+# 从build目录运行
 ./Thermo/tests/compressibility_factor_test
 ./Thermo/tests/tp_thermo_check
 ./RAND/tests/2phase_tests
@@ -56,255 +56,256 @@ rm -rf build && mkdir build && cd build && cmake .. && make
 ./RAND/tests/3phase_rand_test
 ```
 
-## Architecture
+## 架构设计
 
-### Layered Design
+### 分层架构
 
-The codebase follows a strict layered architecture with clear dependency flow:
+代码库遵循严格的分层架构，依赖关系清晰：
 
 ```
-RAND (Flash Solver)
-    ↓ depends on
-PhaseStability (Stability Analysis)
-    ↓ depends on
-Thermo (Thermodynamic Backend)
-    ↓ depends on
-External Libraries (ThermoPack, Eigen3)
+RAND (闪蒸求解器)
+    ↓ 依赖于
+PhaseStability (稳定性分析)
+    ↓ 依赖于
+Thermo (热力学后端)
+    ↓ 依赖于
+外部库 (ThermoPack, Eigen3)
 ```
 
-### Embedded ThermoPack
+### 内嵌ThermoPack
 
-ThermoPack is embedded in `external/thermopack/` with the following structure:
+ThermoPack内嵌于`external/thermopack/`，结构如下：
 
 ```
 external/thermopack/
-├── CMakeLists.txt          # Creates imported thermopack target
+├── CMakeLists.txt          # 创建导入的thermopack目标
 ├── include/
-│   └── cppThermopack/      # C++ headers (11 files)
+│   └── cppThermopack/      # C++头文件（11个文件）
 │       ├── cubic.h
 │       ├── thermo.h
 │       └── ...
 └── lib/
-    └── macos/              # Platform-specific libraries
+    └── macos/              # 平台特定库
         ├── libthermopack.dylib
         └── libthermopack.a
 ```
 
-Build options:
-- `THERMOPACK_USE_STATIC=OFF` (default): Link dynamically
-- `THERMOPACK_USE_STATIC=ON`: Link statically
+构建选项：
+- `THERMOPACK_USE_STATIC=OFF`（默认）：动态链接
+- `THERMOPACK_USE_STATIC=ON`：静态链接
 
-### Core Modules
+### 核心模块
 
-**Thermo/** - Thermodynamic property calculations
-- `thermo_backend.hpp`: Abstract `IThermoBackend` interface defining thermodynamic operations
-  - `chemicalPotentials()`, `dmu_dn()`: Chemical potential and derivatives
-  - `fugacityCoefficients()`, `lnFugacityCoefficients()`: Fugacity calculations
-  - `vaporPhaseFlag()`, `liquidPhaseFlag()`: Phase type identifiers
-  - `minGibbsPhaseFlag()`: Auto-select Gibbs-minimum root (ThermoPack `Phase::mingibbs`)
-  - `compressibilityFactor()`: Z = PV/(nRT) for phase type determination
-- `thermopack_adapter.hpp`: `ThermoAdapterTP` wraps ThermoPack's Cubic EOS (PR, SRK)
-- Provides chemical potentials (via `chemical_potential_tv`, ideal + residual), fugacity coefficients, and their derivatives
-- Chemical potential calculation: TP → TV conversion using `specific_volume`, then `chemical_potential_tv` with `PropertyFlag::total`
+**Thermo/** - 热力学性质计算
+- `thermo_backend.hpp`：抽象`IThermoBackend`接口，定义热力学操作
+  - `chemicalPotentials()`, `dmu_dn()`：化学势及其导数
+  - `fugacityCoefficients()`, `lnFugacityCoefficients()`：逸度系数计算
+  - `vaporPhaseFlag()`, `liquidPhaseFlag()`：相类型标识符
+  - `minGibbsPhaseFlag()`：自动选择Gibbs最小根（ThermoPack的`Phase::mingibbs`）
+  - `compressibilityFactor()`：Z = PV/(nRT)，用于相类型判定
+- `thermopack_adapter.hpp`：`ThermoAdapterTP`封装ThermoPack的立方状态方程（PR, SRK）
+- 提供化学势（通过`chemical_potential_tv`，理想+剩余）、逸度系数及其导数
+- 化学势计算：TP → TV转换使用`specific_volume`，然后用`PropertyFlag::total`调用`chemical_potential_tv`
 
-**PhaseStability/** - Phase stability analysis
-- `phase_stability.hpp/cpp`: `PhaseStabilityAnalyzer` class
-- Implements Tangent Plane Distance (TPD) minimization via Michelsen successive substitution
-- Multi-seed approach to detect incipient phases
-- Supports dual reference phases (vapor-like and liquid-like)
+**PhaseStability/** - 相稳定性分析
+- `phase_stability.hpp/cpp`：`PhaseStabilityAnalyzer`类
+- 通过Michelsen逐次替代法实现切平面距离（TPD）最小化
+- 多种子点方法检测潜在相
+- 支持双参考相（类气相和类液相）
 
-**RAND/** - Multi-phase flash solver
-- `rand_flash.hpp/cpp`: Main `RandFlash` class with Newton-Raphson solver
-- `rand_init.cpp`: Initialization routines for 2-phase, 3-phase, and N-phase systems
-- `rand_solver.cpp`: High-level solver entry points with `SolveOptions` control
-- `linear_solver.hpp`: Abstract interface for linear algebra operations
-- `eigen.cpp`: Eigen-based implementation of linear solver
+**RAND/** - 多相闪蒸求解器
+- `rand_flash.hpp/cpp`：主`RandFlash`类，包含Newton-Raphson求解器
+- `rand_init.cpp`：两相、三相和N相系统的初始化例程
+- `rand_solver.cpp`：高层求解器入口，带`SolveOptions`控制
+- `linear_solver.hpp`：线性代数操作的抽象接口
+- `eigen.cpp`：基于Eigen的线性求解器实现
 
-### Key Design Patterns
+### 关键设计模式
 
-1. **Dependency Injection**: `RandFlash` receives `IThermoBackend` and `LinearSolverInterface` references
-2. **Strategy Pattern**: Multiple initialization strategies based on phase count
-3. **Interface Segregation**: Abstract interfaces decouple implementations
+1. **依赖注入**：`RandFlash`接收`IThermoBackend`和`LinearSolverInterface`引用
+2. **策略模式**：基于相数的多种初始化策略
+3. **接口隔离**：抽象接口解耦实现
 
-## Key Data Structures
+## 关键数据结构
 
 ### FlashInput
-Defines the input for flash calculations:
-- `z`: Overall composition (mole fractions)
-- `T`: Temperature
-- `P`: Pressure
-- `phase_labels`: Phase identifiers (e.g., "vapor", "liquid")
+定义闪蒸计算的输入：
+- `z`：总体组成（摩尔分数）
+- `T`：温度
+- `P`：压力
+- `phase_labels`：相标识符（如"vapor"、"liquid"）
 
 ### MultiFlashResult
-Contains the solution:
-- `phases`: Vector of `PhaseContext`, each containing:
-  - `state`: `PhaseState` with T, P, moleNumbers, phaseFlag
-  - `x`: Composition (mole fractions)
-  - `mu`: Chemical potentials
-  - `m`, `M`: Jacobian matrices
-- `success`: Convergence status
-- `iterations`: Number of iterations
-- `mu_infinity_norm`: Convergence error metric
-- `pressure`, `temperature`: System conditions
-- Convenience methods: `beta(j)`, `n_phase(j)`, `numPhases()`
+包含求解结果：
+- `phases`：`PhaseContext`向量，每个包含：
+  - `state`：`PhaseState`，含T、P、moleNumbers、phaseFlag
+  - `x`：组成（摩尔分数）
+  - `mu`：化学势
+  - `m`、`M`：Jacobian矩阵
+- `success`：收敛状态
+- `iterations`：迭代次数
+- `mu_infinity_norm`：收敛误差指标
+- `pressure`、`temperature`：系统条件
+- 便捷方法：`beta(j)`、`n_phase(j)`、`numPhases()`
 
 ### SolveOptions
-Controls solver behavior:
-- `max_iterations`: Maximum Newton iterations
-- `tolerance`: Convergence tolerance
-- `enable_stability_analysis`: Toggle automatic phase detection
-- `verbose`: Debug output control
+控制求解器行为：
+- `max_iterations`：最大Newton迭代次数
+- `tolerance`：收敛容差
+- `enable_stability_analysis`：切换自动相检测
+- `verbose`：调试输出控制
 
-## Algorithm Overview
+## 算法概述
 
-### Phase Stability Analysis
-1. Compute TPD for trial compositions using successive substitution
-2. Test multiple random seeds to find all incipient phases
-3. Use both vapor-like and liquid-like reference phases
-4. Return list of stable phases with their compositions
+### 相稳定性分析
+1. 使用逐次替代法计算试探组成的TPD
+2. 测试多个随机种子点以找到所有潜在相
+3. 同时使用类气相和类液相参考相
+4. 返回稳定相列表及其组成
 
-### Multi-Phase Flash Solver
-1. Initialize phase fractions and compositions (via `rand_init.cpp`)
-2. Set all phases to use `minGibbsPhaseFlag` (ThermoPack auto-selects stable root)
-3. Newton-Raphson iteration on reduced chemical potentials:
-   - Compute Hessian and gradient
-   - Fix Hessian positive-definiteness via tangent space projection
-   - Solve linear system for Newton step
-   - Apply line search with alpha stepping
-4. Check convergence based on reduced chemical potential differences
-5. Post-convergence: Determine actual phase types via compressibility factor (Z > 0.5 → Vapor)
-6. Reorder phases: Vapor → Oil-like liquid → Water-rich liquid
-7. Return phase fractions, compositions, and convergence status
+### 多相闪蒸求解器
+1. 初始化相分率和组成（通过`rand_init.cpp`）
+2. 将所有相设置为使用`minGibbsPhaseFlag`（ThermoPack自动选择稳定根）
+3. 对约化化学势进行Newton-Raphson迭代：
+   - 计算Hessian矩阵和梯度
+   - 通过切空间投影修正Hessian正定性
+   - 求解线性系统得到Newton步长
+   - 应用线搜索和步长调整
+4. 基于约化化学势差异检查收敛
+5. 收敛后：通过压缩因子确定实际相类型（Z > 0.5 → 气相）
+6. 重排相序：气相 → 类油液相 → 富水液相
+7. 返回相分率、组成和收敛状态
 
-### Reactive Systems Support
+### 反应体系支持
 
-The RAND algorithm supports reactive equilibrium through element conservation:
+RAND算法通过元素守恒支持反应平衡：
 
-**Element Matrix (A)**: Defines elemental composition of each species
-- A[e][i] = number of atoms of element e in species i
-- Dimensions: E (elements) × C (species)
-- For non-reactive systems: A = identity matrix
-- For reactive systems: A = actual chemical formula matrix
+**元素矩阵(A)**：定义每个组分的元素组成
+- A[e][i] = 组分i中元素e的原子数
+- 维度：E（元素数）× C（组分数）
+- 非反应体系：A = 单位矩阵
+- 反应体系：A = 实际化学式矩阵
 
-**Conservation Constraints**:
-- Element conservation: ∑_j ∑_i A[e][i] × n_i^(j) = b_e (constant)
-- Replaces species conservation in non-reactive systems
-- Automatically satisfies reaction equilibrium via element potentials
+**守恒约束**：
+- 元素守恒：∑_j ∑_i A[e][i] × n_i^(j) = b_e（常数）
+- 替代非反应体系中的组分守恒
+- 通过元素势自动满足反应平衡
 
-**Example**: Hydrocarbon system (C1, C2, C3)
+**示例**：烃类体系（C1, C2, C3）
 ```
        C1   C2   C3
-  C  [  1    2    3  ]   (carbon atoms)
-  H  [  4    6    8  ]   (hydrogen atoms)
+  C  [  1    2    3  ]   (碳原子)
+  H  [  4    6    8  ]   (氢原子)
 ```
 
-## Code Navigation Tips
+## 代码导航提示
 
-### Entry Points
-- `RandFlash::solve()` in `RAND/src/rand_solver.cpp` - Main multi-phase flash solver
-- `PhaseStabilityAnalyzer::analyze()` in `PhaseStability/src/phase_stability.cpp` - Stability testing
-- `ThermoAdapterTP` in `Thermo/include/thermopack_adapter.hpp` - Thermodynamic calculations
+### 入口点
+- `RandFlash::solve()`位于`RAND/src/rand_solver.cpp` - 主多相闪蒸求解器
+- `PhaseStabilityAnalyzer::analyze()`位于`PhaseStability/src/phase_stability.cpp` - 稳定性测试
+- `ThermoAdapterTP`位于`Thermo/include/thermopack_adapter.hpp` - 热力学计算
 
-### Understanding the Solver
-1. Start with `RAND/include/rand_flash.hpp` for public API
-2. Read `RAND/tests/2phase_tests.cpp` for usage examples
-3. Study `RAND/src/rand_flash.cpp` for Newton-Raphson core algorithm
-4. Review `RAND/src/rand_init.cpp` for initialization strategies
+### 理解求解器
+1. 从`RAND/include/rand_flash.hpp`开始了解公共API
+2. 阅读`RAND/tests/2phase_tests.cpp`查看使用示例
+3. 研究`RAND/src/rand_flash.cpp`了解Newton-Raphson核心算法
+4. 查看`RAND/src/rand_init.cpp`了解初始化策略
 
-### Adding New Features
-- New thermodynamic models: Implement `IThermoBackend` interface
-- New linear solvers: Implement `LinearSolverInterface` interface
-- New initialization strategies: Add to `rand_init.cpp`
-- New convergence criteria: Modify `checkConvergence()` in `rand_flash.cpp`
+### 添加新功能
+- 新热力学模型：实现`IThermoBackend`接口
+- 新线性求解器：实现`LinearSolverInterface`接口
+- 新初始化策略：添加到`rand_init.cpp`
+- 新收敛准则：修改`rand_flash.cpp`中的`checkConvergence()`
 
-### Using Reactive Systems
+### 使用反应体系
 
-**Element Matrix Builder** (`RAND/include/element_matrix_builder.hpp`):
+**元素矩阵构建器**（`RAND/include/element_matrix_builder.hpp`）：
 
 ```cpp
 #include "element_matrix_builder.hpp"
 
-// Define species by chemical formula
+// 通过化学式定义组分
 std::vector<SpeciesFormula> species = {
-    parseFormula("C1", "CH4"),    // Methane
-    parseFormula("C2", "C2H6"),   // Ethane
-    parseFormula("C3", "C3H8")    // Propane
+    parseFormula("C1", "CH4"),    // 甲烷
+    parseFormula("C2", "C2H6"),   // 乙烷
+    parseFormula("C3", "C3H8")    // 丙烷
 };
 
-// Build element matrix
+// 构建元素矩阵
 std::vector<std::string> elementNames;
 auto A = buildElementMatrix(species, elementNames);
-// Returns: A[0] = [1, 2, 3] (carbon), A[1] = [4, 6, 8] (hydrogen)
+// 返回：A[0] = [1, 2, 3]（碳），A[1] = [4, 6, 8]（氢）
 // elementNames = ["C", "H"]
 
-// Compute element moles from feed composition
+// 从进料组成计算元素摩尔数
 std::vector<double> z = {0.5, 0.3, 0.2};
 auto elementMoles = computeElementMoles(A, z);
-// Returns: [1.7, 5.4] (carbon and hydrogen moles)
+// 返回：[1.7, 5.4]（碳和氢的摩尔数）
 ```
 
-**Running Flash with Element Matrix**:
+**使用元素矩阵运行闪蒸**：
 
 ```cpp
-// Setup backend and solver
+// 设置后端和求解器
 auto backend = std::make_unique<ThermoPackBackend>("C1,C2,C3", "PR");
 auto linSolver = ls::createEigenSolver();
 RandFlash flash(*backend, *linSolver);
 
-// Prepare input
+// 准备输入
 FlashInput input;
 input.temperature = 300.0;  // K
 input.pressure = 1e5;       // Pa
 input.feedMoles = {0.5, 0.3, 0.2};
 
-// IMPORTANT: For reactive systems, MUST disable stability test
-// and manually specify phase count
+// 重要：对于反应体系，必须禁用稳定性测试
+// 并手动指定相数
 SolveOptions options;
-options.enable_stability_test = false;  // Stability analysis not applicable
-options.forced_phase_count = 1;         // Manually specify number of phases
+options.enable_stability_test = false;  // 稳定性分析不适用
+options.forced_phase_count = 1;         // 手动指定相数
 auto result = flash.solve(input, A, options);
 
-// Element conservation is automatically enforced
-// Verify: computeElementMoles(A, result.phases[j].state.moleNumbers) = elementMoles
+// 元素守恒自动强制执行
+// 验证：computeElementMoles(A, result.phases[j].state.moleNumbers) = elementMoles
 ```
 
-**Important Notes for Reactive Systems**:
-- Species moles are NOT conserved; only element moles are conserved
-- Phase stability analysis is NOT applicable (species composition changes via reactions)
-- Must use `enable_stability_test = false` and `forced_phase_count`
-- Some species may not exist initially (generated through reactions)
+**反应体系重要注意事项**：
+- 组分摩尔数不守恒；仅元素摩尔数守恒
+- 相稳定性分析不适用（组分组成通过反应变化）
+- 必须使用`enable_stability_test = false`和`forced_phase_count`
+- 某些组分初始可能不存在（通过反应生成）
 
-## Current Development Status
+## 当前开发状态
 
-**Branch**: `feature/reaction`
+**分支**：`feature/reaction`
 
-Recent changes:
-- Embedded ThermoPack into project (`external/thermopack/`), eliminating external dependency
-- Renamed `thermo_adapter.hpp` to `thermopack_adapter.hpp` for clarity
-- Replaced assembled chemical potential with ThermoPack's native `chemical_potential_tv` (ideal + residual)
-- Added switchable stability analysis control via `SolveOptions::enable_stability_analysis`
-- Unified multi-phase interface (removed separate `solveMultiPhase` methods)
-- Improved convergence criteria using reduced chemical potentials
-- Separated initialization logic into `rand_init.cpp`
-- Added `minGibbsPhaseFlag()` to auto-select Gibbs-minimum root during iteration
-- Streamlined `MultiFlashResult` - removed redundant `n_phase`/`beta` fields, data now accessed via `phases`
-- Post-convergence phase type determination using compressibility factor Z
-- **NEW**: Extended RAND algorithm to support reactive systems via element conservation
-- **NEW**: Added element matrix builder (`element_matrix_builder.hpp/cpp`) for chemical formula parsing
-- **NEW**: Implemented reactive system initialization functions (`initializeReactiveSinglePhase`, `initializeReactiveMultiPhase`)
-- **NEW**: Added comprehensive test suite for reactive systems (`reactive_flash_test.cpp`)
-- **NEW**: Element conservation automatically enforced throughout Newton-Raphson iteration
+最近更改：
+- 将ThermoPack内嵌到项目（`external/thermopack/`），消除外部依赖
+- 将`thermo_adapter.hpp`重命名为`thermopack_adapter.hpp`以提高清晰度
+- 用ThermoPack原生的`chemical_potential_tv`（理想+剩余）替换组装的化学势
+- 通过`SolveOptions::enable_stability_analysis`添加可切换的稳定性分析控制
+- 统一多相接口（移除单独的`solveMultiPhase`方法）
+- 使用约化化学势改进收敛准则
+- 将初始化逻辑分离到`rand_init.cpp`
+- 添加`minGibbsPhaseFlag()`以在迭代期间自动选择Gibbs最小根
+- 精简`MultiFlashResult` - 移除冗余的`n_phase`/`beta`字段，数据现通过`phases`访问
+- 使用压缩因子Z进行收敛后相类型判定
+- **新增**：通过元素守恒扩展RAND算法以支持反应体系
+- **新增**：添加元素矩阵构建器（`element_matrix_builder.hpp/cpp`）用于化学式解析
+- **新增**：实现反应体系初始化函数（`initializeReactiveSinglePhase`、`initializeReactiveMultiPhase`）
+- **新增**：添加反应体系综合测试套件（`reactive_flash_test.cpp`）
+- **新增**：在整个Newton-Raphson迭代过程中自动强制执行元素守恒
 
-## Dependencies
+## 依赖项
 
-- **ThermoPack**: Thermodynamic property calculations (embedded in `external/thermopack/`)
-- **Eigen3**: Linear algebra library (installed via vcpkg)
-- **GTest**: Unit testing framework (installed via vcpkg)
-- **vcpkg**: C++ package manager (must set `VCPKG_ROOT`)
+- **ThermoPack**：热力学性质计算（内嵌于`external/thermopack/`）
+- **Eigen3**：线性代数库（通过vcpkg安装）
+- **GTest**：单元测试框架（通过vcpkg安装）
+- **spdlog**：日志库（通过vcpkg安装）
+- **vcpkg**：C++包管理器（必须设置`VCPKG_ROOT`）
 
-## File Naming Conventions
+## 文件命名约定
 
-- Headers: `.hpp` extension
-- Implementation: `.cpp` extension
-- Tests: `*_test.cpp` or `*_tests.cpp` suffix
-- Each module has `include/`, `src/`, and `tests/` subdirectories
+- 头文件：`.hpp`扩展名
+- 实现文件：`.cpp`扩展名
+- 测试文件：`*_test.cpp`或`*_tests.cpp`后缀
+- 每个模块都有`include/`、`src/`和`tests/`子目录

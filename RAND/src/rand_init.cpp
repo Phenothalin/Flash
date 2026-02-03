@@ -2,10 +2,10 @@
 // 负责：两相/三相通用初始化（Least-Squares + Strict Element Scaling），生成可行初值（n,x,beta）。
 
 #include "rand_flash.hpp"
+#include "rand_logger.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <numeric>
 #include <stdexcept>
 
@@ -368,10 +368,10 @@ InitResult RandFlash::initializeThreePhaseWater(
     }
 
     // 打印调试信息
-    std::cout << "[Init] Sequential Split Init:\n"
-              << "       Est. Beta V: " << betaV << " (Alpha_vap of HC: " << alpha_vap << ")\n"
-              << "       Est. Beta O: " << betaO << "\n"
-              << "       Est. Beta W: " << betaW << " (Water idx: " << water_idx << ")\n";
+    RAND_DEBUG("[Init] Sequential Split Init:");
+    RAND_DEBUG("       Est. Beta V: {} (Alpha_vap of HC: {})", betaV, alpha_vap);
+    RAND_DEBUG("       Est. Beta O: {}", betaO);
+    RAND_DEBUG("       Est. Beta W: {} (Water idx: {})", betaW, water_idx);
 
     return out;
 }

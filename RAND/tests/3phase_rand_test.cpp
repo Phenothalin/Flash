@@ -5,7 +5,8 @@
 #include <iomanip>
 
 #include "rand_flash.hpp"
-
+#include "rand_logger.hpp" 
+                                                                                                          
 // 简单的辅助打印函数
 void printPhase(const std::string& name, const std::vector<double>& n, double totalFeed) {
     double beta = 0.0;
@@ -23,6 +24,7 @@ void printPhase(const std::string& name, const std::vector<double>& n, double to
 }
 
 int main() {
+  randflash::setLogLevel(spdlog::level::debug);
   try {
     // 1) 构建 ThermoPack 后端
     // 典型的 LLV 体系：水 + 甲烷 + 正己烷

@@ -3,11 +3,11 @@
 // 说明：该文件只做“流程编排”，数值内核在 rand_solver.cpp / rand_flash.cpp，初始化在 rand_init.cpp。
 
 #include "rand_flash.hpp"
+#include "rand_logger.hpp"
 #include "phase_stability.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -172,8 +172,7 @@ static bool prune_and_merge_phases(
                     changed = true;
 
                     if (verbose) {
-                        std::cout << "[PhaseMerge] merged phase " << kill
-                                  << " into " << keep << ", L1(x)=" << dist << "\n";
+                        RAND_DEBUG("[PhaseMerge] merged phase {} into {}, L1(x)={}", kill, keep, dist);
                     }
                     break;
                 }
@@ -234,9 +233,8 @@ static bool prune_and_merge_phases(
         changed = true;
 
         if (verbose) {
-            std::cout << "[PhasePrune] removed tiny phase " << kill
-                      << " (beta=" << bmin << ") -> merged into " << tgt
-                      << ", new F=" << sys.phases.size() << "\n";
+            RAND_DEBUG("[PhasePrune] removed tiny phase {} (beta={}) -> merged into {}, new F={}",
+                      kill, bmin, tgt, sys.phases.size());
         }
     }
 
@@ -273,7 +271,7 @@ MultiFlashResult RandFlash::solveWithPhaseGuesses(
 
     // 2) 非反应体系初始化：使用物质守恒初始化
     InitResult init = initializeFromCompositions(sys, F, phaseCompositions, phaseFlags);
-    std::cout << "[Init] Initialized " << F << " phases with Least-Squares + Strict Element Scaling.\n";
+    RAND_INFO("[Init] Initialized {} phases with Least-Squares + Strict Element Scaling.", F);
 
     for (int j = 0; j < F; ++j) {
         sys.phases[j].state = {input.temperature, input.pressure, init.n_phases[j], phaseFlags[j]};
@@ -335,10 +333,10 @@ MultiFlashResult RandFlash::solveReactive(
 
     if (numPhases == 1) {
         init = initializeReactiveSinglePhase(sys, elementMoles, phaseFlags[0]);
-        std::cout << "[Init] Initialized 1 phase with Reactive Element Conservation.\n";
+        RAND_INFO("[Init] Initialized 1 phase with Reactive Element Conservation.");
     } else {
         init = initializeReactiveMultiPhase(sys, numPhases, phaseFlags, elementMoles);
-        std::cout << "[Init] Initialized " << numPhases << " phases with Reactive Element Conservation.\n";
+        RAND_INFO("[Init] Initialized {} phases with Reactive Element Conservation.", numPhases);
     }
 
     // 4) 填充相状态
@@ -388,7 +386,10 @@ MultiFlashResult RandFlash::solve(
     opt.verbose = false;
 
     auto stab = analyzer.analyze(input.temperature, input.pressure, input.feedMoles, opt);
-
+    for(const auto& inc : stab.incipient) {
+        RAND_DEBUG("[Stability] Found incipient phase: flag={}, TPD={}, iters={}",
+                  inc.phase_flag, inc.tpd, inc.iters);
+    }
     // 2) 单相稳定：直接返回（不进入 Rand 迭代）
     if (stab.stable) {
         MultiFlashResult result;
@@ -454,24 +455,7 @@ MultiFlashResult RandFlash::solve(
         return normalize(x);
     };
 
-    // 探测是否含水（用于 LLV：水/油两液相）
-    int water_idx = -1;
-    {
-        const auto names = thermo_.getComponentNames();
-        for (size_t i = 0; i < std::min(names.size(), input.feedMoles.size()); ++i) {
-            std::string n = names[i];
-            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
-            if (n == "H2O" || n == "WATER" || n.find("H2O") != std::string::npos) {
-                water_idx = static_cast<int>(i);
-                break;
-            }
-        }
-    }
-    const double ztot = std::accumulate(input.feedMoles.begin(), input.feedMoles.end(), 0.0);
-    const double z_water = (water_idx >= 0 && ztot > 0.0) ? (input.feedMoles[water_idx] / ztot) : 0.0;
-    const bool has_water = (water_idx >= 0 && z_water > 1e-6);
-
-    // 收集 incipient：最多 2 个
+    // 收集 incipient 相
     std::vector<std::vector<double>> liquid_cands;
     std::vector<std::vector<double>> vapor_cands;
     for (const auto& inc : stab.incipient) {
@@ -479,73 +463,50 @@ MultiFlashResult RandFlash::solve(
         if (inc.phase_flag == vap) vapor_cands.push_back(inc.x);
     }
 
-    // 默认：先做 2 相（最不容易引入回归）
-    // VLE: {VAP, LIQ}
-    // LLE: {LIQ, LIQ}
-    // LLV: {VAP, LIQ, LIQ}
+    // === 基于证据的相数选择策略 ===
+    // 原则：根据稳定性分析结果选择最合适的相数，VLLE优先
 
-    // --- 2 相初猜 ---
-    std::vector<std::vector<double>> comps2;
-    std::vector<int> flags2;
-    comps2.reserve(2);
-    flags2.reserve(2);
-
-    // vapor guess
+    // vapor guess (用于回退场景)
     std::vector<double> xV = (!vapor_cands.empty()) ? vapor_cands.front() : build_wilson_guess(true);
-    // liquid guess
+    // liquid guess (用于回退场景)
     std::vector<double> xL = (!liquid_cands.empty()) ? liquid_cands.front() : build_wilson_guess(false);
 
     // 若 reference 是 vapor 或 liquid，则更倾向于把 z 放在对应相上（更稳健）
     if (stab.reference_phase_flag == vap) xV = normalize(input.feedMoles);
     if (stab.reference_phase_flag == liq) xL = normalize(input.feedMoles);
 
-    // 判断是否更像 LLE（两套 liquid），仅当 stability 明确给出 >=2 个 liquid candidate
-    const bool want_LLE = (liquid_cands.size() >= 2) && (vapor_cands.empty()) && !has_water;
+    // === 场景判别 ===
+    const bool is_VLLE = (!vapor_cands.empty()) && (liquid_cands.size() >= 2);
+    const bool is_LLE = (vapor_cands.empty()) && (liquid_cands.size() >= 2);
 
-    if (want_LLE) {
-        comps2 = { liquid_cands[0], liquid_cands[1] };
-        flags2 = { mingibbs, mingibbs };
-    } else {
-        comps2 = { xV, xL };
-        flags2 = { mingibbs, mingibbs };
-    }
-
-    // --- 3 相判别（仅当确实需要两套 liquid 时才启用）---
-    // 1) 水体系：优先尝试 LLV
-    // 2) 非水体系：只有在 liquid candidate >= 2 时才尝试 LLV
-    const bool want_LLV = has_water || (liquid_cands.size() >= 2);
-
-    if (want_LLV && !want_LLE) {
-        // 3 相初值：优先来自稳定性结果；不够则用通用 3 相初始化补齐
-        SystemContext sys0;
-        sys0.temperature = input.temperature;
-        sys0.pressure = input.pressure;
-        sys0.feedMoles = input.feedMoles;
-        sys0.elementMatrix = elementMatrix;
-
+    // === 场景1: VLLE - 优先尝试3相 ===
+    if (is_VLLE) {
         std::vector<std::vector<double>> comps3;
-        std::vector<int> flags3 = {mingibbs, mingibbs, mingibbs};
+        std::vector<int> flags3 = {vap, liq, liq};
 
-        // vapor
-        if (!vapor_cands.empty()) comps3.push_back(vapor_cands.front());
-        else comps3.push_back(build_wilson_guess(true));
-
-        // two liquids
-        if (liquid_cands.size() >= 2) {
-            comps3.push_back(liquid_cands[0]);
-            comps3.push_back(liquid_cands[1]);
-        } else {
-            // 用 Generic 初始化构造两套液相种子（尤其对含水体系更稳健）
-            auto init3 = initializeThreePhaseGeneric(sys0);
-            // init3.compositions 是 {V, L1, L2}
-            comps3 = init3.compositions;
-        }
+        comps3.push_back(vapor_cands.front());
+        comps3.push_back(liquid_cands[0]);
+        comps3.push_back(liquid_cands[1]);
 
         auto res3 = solveWithPhaseGuesses(input, elementMatrix, comps3, flags3, maxIter, tol);
         if (res3.success) return res3;
-        // 3 相失败时回退 2 相
+
+        // 3相失败，回退到2相VLE
+        std::vector<std::vector<double>> comps2 = { xV, xL };
+        std::vector<int> flags2 = { vap, liq };
+        return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
     }
 
+    // === 场景2: LLE - 2相液液平衡 ===
+    if (is_LLE) {
+        std::vector<std::vector<double>> comps2 = { liquid_cands[0], liquid_cands[1] };
+        std::vector<int> flags2 = { liq, liq };
+        return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
+    }
+
+    // === 场景3: VLE - 默认2相气液平衡 ===
+    std::vector<std::vector<double>> comps2 = { xV, xL };
+    std::vector<int> flags2 = { vap, liq };
     return solveWithPhaseGuesses(input, elementMatrix, comps2, flags2, maxIter, tol);
 }
 
@@ -561,6 +522,22 @@ MultiFlashResult RandFlash::solve(
     int maxIter,
     double tol)
 {
+    // === 新增：反应体系路由 ===
+    if (opt.is_reactive) {
+        if (opt.auto_phase_count) {
+            // 自动相数判断
+            return solveReactiveAuto(input, elementMatrix, opt.max_phases, maxIter, tol);
+        } else {
+            // 必须指定相数
+            if (opt.forced_phase_count <= 0) {
+                throw std::invalid_argument(
+                    "Reactive mode requires forced_phase_count > 0 or auto_phase_count = true");
+            }
+            return solveReactive(input, elementMatrix, opt.forced_phase_count, maxIter, tol);
+        }
+    }
+
+    // === 原有非反应体系逻辑 ===
     const int vap = thermo_.vaporPhaseFlag();
     const int liq = thermo_.liquidPhaseFlag();
     const int mingibbs = thermo_.minGibbsPhaseFlag();
@@ -722,7 +699,7 @@ MultiFlashResult RandFlash::solveGeneral(
     std::vector<double> deltaBeta;
     std::vector<std::vector<double>> dnPhases;
 
-    std::cout << "进入通用迭代循环 (F=" << sys.phases.size() << "), maxIter = " << maxIter << std::endl;
+    RAND_DEBUG("进入通用迭代循环 (F={}), maxIter = {}", sys.phases.size(), maxIter);
 
     // Phase pruning/merge parameters (conservative defaults)
     const double beta_rel_prune = 1e-14;   // relative to total feed
@@ -734,7 +711,7 @@ MultiFlashResult RandFlash::solveGeneral(
             size_t F = sys.phases.size();
             if (F == 0) throw std::runtime_error("No phases in SystemContext");
 
-            std::cout << "\n=== RandFlash General Iter " << (iter + 1) << " ===\n";
+            RAND_DEBUG("\n=== RandFlash General Iter {} ===", iter + 1);
 
             // Allocate/resize per-iteration containers
             deltaBeta.assign(F, 0.0);
@@ -770,10 +747,11 @@ MultiFlashResult RandFlash::solveGeneral(
             double lin_resid = 0.0;
             sol = solveGlobalLinearSystem(Acoef, rhs, &lin_resid);
 
+            std::string deltaBetaStr;
             for (size_t i = E; i < E + F; ++i) {
-                std::cout << "∆β[" << (i - E) << "]=" << sol[i] << "  ";
+                deltaBetaStr += fmt::format("∆β[{}]={:.6g}  ", i - E, sol[i]);
             }
-            std::cout << std::endl;
+            RAND_DEBUG("{}", deltaBetaStr);
 
             if (sol.size() != E + F) throw std::runtime_error("Linear solve size mismatch");
 
@@ -798,7 +776,7 @@ MultiFlashResult RandFlash::solveGeneral(
             // 5) Phase pruning/merge after update (handles beta->0 degeneracy)
             const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
             if (changed) {
-                std::cout << "[PhasePrune] Active phases changed -> F=" << sys.phases.size() << std::endl;
+                RAND_DEBUG("[PhasePrune] Active phases changed -> F={}", sys.phases.size());
             }
 
             // 6) Recompute mu for convergence check using the UPDATED state
@@ -864,11 +842,11 @@ MultiFlashResult RandFlash::solveReactiveAuto(
         }
     }
 
-    std::cout << "\n=== Reactive System Auto Phase Number Determination ===\n";
-    std::cout << "Max phases: " << maxPhases << "\n";
-    std::cout << "Element moles: ";
-    for (double em : elementMoles) std::cout << em << " ";
-    std::cout << "\n\n";
+    std::string elemStr;
+    for (double em : elementMoles) elemStr += fmt::format("{:.6g} ", em);
+    RAND_INFO("\n=== Reactive System Auto Phase Number Determination ===");
+    RAND_INFO("Max phases: {}", maxPhases);
+    RAND_INFO("Element moles: {}", elemStr);
 
     MultiFlashResult bestResult;
     double bestGibbs = 1e100;
@@ -878,7 +856,7 @@ MultiFlashResult RandFlash::solveReactiveAuto(
 
     // Try phase counts from 1 to maxPhases
     for (int F = 1; F <= maxPhases; ++F) {
-        std::cout << "\n--- Trying F = " << F << " phases ---\n";
+        RAND_DEBUG("\n--- Trying F = {} phases ---", F);
 
         // Setup solve options for forced phase count
         SolveOptions opt;
@@ -890,7 +868,7 @@ MultiFlashResult RandFlash::solveReactiveAuto(
         auto result = solve(input, elementMatrix, opt, maxIterations, tolerance);
 
         if (!result.success) {
-            std::cout << "F = " << F << " failed to converge, stopping.\n";
+            RAND_DEBUG("F = {} failed to converge, stopping.", F);
             break;
         }
 
@@ -908,7 +886,7 @@ MultiFlashResult RandFlash::solveReactiveAuto(
         }
 
         double G = computeTotalGibbs(sys);
-        std::cout << "F = " << F << " converged, G_total = " << G << " J\n";
+        RAND_DEBUG("F = {} converged, G_total = {} J", F, G);
 
         // Check if this is better than previous
         if (F == 1 || G < bestGibbs - 1e-6) {
@@ -916,17 +894,17 @@ MultiFlashResult RandFlash::solveReactiveAuto(
             bestGibbs = G;
             bestResult = result;
             bestPhaseCount = F;
-            std::cout << "  -> New best solution (ΔG = " << (F > 1 ? bestGibbs - G : 0.0) << ")\n";
+            RAND_DEBUG("  -> New best solution (ΔG = {})", (F > 1 ? bestGibbs - G : 0.0));
         } else {
             // No improvement, stop
-            std::cout << "  -> No improvement (ΔG = " << (G - bestGibbs) << "), stopping.\n";
+            RAND_DEBUG("  -> No improvement (ΔG = {}), stopping.", (G - bestGibbs));
             break;
         }
     }
 
-    std::cout << "\n=== Auto Phase Determination Complete ===\n";
-    std::cout << "Optimal phase count: " << bestPhaseCount << "\n";
-    std::cout << "Final Gibbs energy: " << bestGibbs << " J\n\n";
+    RAND_INFO("\n=== Auto Phase Determination Complete ===");
+    RAND_INFO("Optimal phase count: {}", bestPhaseCount);
+    RAND_INFO("Final Gibbs energy: {} J", bestGibbs);
 
     return bestResult;
 }

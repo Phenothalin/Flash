@@ -1,13 +1,14 @@
 // RAND/src/rand_flash.cpp
 #include "rand_flash.hpp"
+#include "rand_logger.hpp"
 #include <numeric>
 #include <cmath>
 #include <cassert>
 #include <cstdlib>
 #include <stdexcept>
-#include <iostream>
 #include <algorithm>
 #include <iomanip>
+#include <sstream>
 
 using namespace randflash;
 using namespace ls;
@@ -362,9 +363,7 @@ void RandFlash::fixPhaseHessian(PhaseContext& phaseCtx,
       fix_phase_hessian_one_phase(linearSolver_, phaseCtx.x, phaseCtx.m, opt);
 
   if (fixRes.applied) {
-    std::cout << "[PhaseFix] lam_min "
-              << fixRes.lam_min_before << " -> "
-              << fixRes.lam_min_after << std::endl;
+    RAND_DEBUG("[PhaseFix] lam_min {} -> {}", fixRes.lam_min_before, fixRes.lam_min_after);
   }
 
   // 2) 用返回的 m_fixed（如果有），否则就用当前 m
@@ -543,8 +542,8 @@ double RandFlash::lineSearch(
       dir += dot(dnPhases[j], gPhases[j]);
   }
 
-  const double dir_eps = 1e-12; 
-  std::cout << "  descent metric = " << dir << std::endl; 
+  const double dir_eps = 1e-12;
+  RAND_DEBUG("  descent metric = {}", dir);
 
   double alpha = init_alpha;
   while (alpha > min_alpha) {
@@ -714,7 +713,7 @@ void RandFlash::applyUpdate(
       nPhases_inout, dnPhases, gPhases,
       1.0, 1e-10, 0.5);
 
-  std::cout << "  线搜索步长 alpha = " << std::fixed << std::setprecision(4)<<alpha << std::endl;
+  RAND_DEBUG("  线搜索步长 alpha = {:.4f}", alpha);
 
   // 更新 n，并执行 Clamping
   const double min_mole_floor = 1e-20; // 物理下限
@@ -731,31 +730,30 @@ void RandFlash::applyUpdate(
   }
 
   // 打印各相总摩尔数 (Beta)
-  std::cout << "  更新后各相总摩尔数 (Beta): ";
+  std::string betaStr = "  更新后各相总摩尔数 (Beta): ";
   for(size_t j=0; j<F; ++j) {
       double beta_j = std::accumulate(nPhases_inout[j].begin(), nPhases_inout[j].end(), 0.0);
-      std::cout << std::fixed << std::setprecision(6) << beta_j << " ";
+      betaStr += fmt::format("{:.6f} ", beta_j);
   }
-  std::cout << "\n";
+  RAND_DEBUG("{}", betaStr);
 
   // ========== 新增：打印各相摩尔分率（固定小数位，无科学计数法） ==========
-  std::cout << "  更新后各相摩尔分率:\n";
+  std::string moleFracStr = "  更新后各相摩尔分率:\n";
   for(size_t j=0; j<F; ++j) {
       // 计算当前相的总摩尔数
       double beta_j = std::accumulate(nPhases_inout[j].begin(), nPhases_inout[j].end(), 0.0);
       // 防止除以0（理论上不会触发，因有min_mole_floor）
       beta_j = std::max(beta_j, min_mole_floor);
 
-      std::cout << "    相 " << j+1 << ": ";
+      moleFracStr += fmt::format("    相 {}: ", j+1);
       for(size_t i=0; i<nPhases_inout[j].size(); ++i) {
           // 计算摩尔分率
           double mole_frac = nPhases_inout[j][i] / beta_j;
-          // 输出格式：固定8位小数（无科学计数法），覆盖0~1范围的精度需求
-          std::cout << std::fixed << std::setprecision(8) << mole_frac << " ";
+          moleFracStr += fmt::format("{:.8f} ", mole_frac);
       }
-      std::cout << "\n";
+      moleFracStr += "\n";
   }
-  std::cout << "\n";
+  RAND_DEBUG("{}", moleFracStr);
 }
 
 // 7) 收敛判断：打印与返回布尔值（阈值保持原样：elem_error < 1e-8）
@@ -835,12 +833,13 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
       relative_step_norm = (n_norm > 1e-20) ? std::sqrt(step_norm / n_norm) : 0.0;
   }
 
-  std::cout << "Iter "<< iternumber <<" | max_mu/RT_diff (filtered): " << max_mu_diff
-            << " | elem_err: " << elem_err;
   if (isReactive && F == 1) {
-      std::cout << " | relative_step_norm: " << relative_step_norm;
+      RAND_DEBUG("Iter {} | max_mu/RT_diff (filtered): {} | elem_err: {} | relative_step_norm: {}",
+                iternumber, max_mu_diff, elem_err, relative_step_norm);
+  } else {
+      RAND_DEBUG("Iter {} | max_mu/RT_diff (filtered): {} | elem_err: {}",
+                iternumber, max_mu_diff, elem_err);
   }
-  std::cout << std::endl;
 
   info.max_mu_diff = max_mu_diff;
   info.elem_error  = elem_err;
@@ -862,18 +861,17 @@ void RandFlash::printResult(const MultiFlashResult& res) const {
   // 1. 自动从 Backend 获取组分名称
   std::vector<std::string> compNames = thermo_.getComponentNames();
 
-  std::cout << "\n============================== Flash Results ==============================\n";
-  std::cout << std::fixed << std::setprecision(2);
-  std::cout << "Temperature: " << res.temperature << " K\n";
-  std::cout << "Pressure:    " << res.pressure << " Pa\n";
-  std::cout << "Iterations:  " << res.iterations << "\n";
-  std::cout << "Status:      " << (res.success ? "CONVERGED" : "FAILED") << "\n";
-  std::cout << "Error Norm:  " << std::scientific << std::setprecision(4) << res.mu_infinity_norm << "\n";
+  RAND_INFO("\n============================== Flash Results ==============================");
+  RAND_INFO("Temperature: {:.2f} K", res.temperature);
+  RAND_INFO("Pressure:    {:.2f} Pa", res.pressure);
+  RAND_INFO("Iterations:  {}", res.iterations);
+  RAND_INFO("Status:      {}", (res.success ? "CONVERGED" : "FAILED"));
+  RAND_INFO("Error Norm:  {:.4e}", res.mu_infinity_norm);
 
   size_t F = res.phases.size();
   if (F == 0) {
-      std::cout << "No phases returned.\n";
-      std::cout << "===========================================================================\n";
+      RAND_INFO("No phases returned.");
+      RAND_INFO("===========================================================================");
       return;
   }
 
@@ -889,8 +887,6 @@ void RandFlash::printResult(const MultiFlashResult& res) const {
       total_moles += res.beta(j);
   }
 
-  std::cout << std::fixed << std::setprecision(5);
-
   for (size_t j = 0; j < F; ++j) {
       double beta_j = res.beta(j);
       double phase_frac = (total_moles > 1e-12) ? (beta_j / total_moles) : 0.0;
@@ -904,26 +900,21 @@ void RandFlash::printResult(const MultiFlashResult& res) const {
           phaseType = "Liquid";
       }
 
-      std::cout << "\n---------------------------------------------------------------------------\n";
-      std::cout << " " << phaseType << " " << j << " | Phase Fraction (Beta): " << phase_frac << " | Total Moles: " << beta_j << "\n";
-      std::cout << "---------------------------------------------------------------------------\n";
-      std::cout << "  Idx | " << std::left << std::setw(15) << "Component" << " | "
-                << std::right << std::setw(12) << "Mole Frac (x)" << " | "
-                << std::setw(12) << "Moles (n)" << "\n";
-      std::cout << "------+-----------------+--------------+--------------\n";
+      RAND_INFO("\n---------------------------------------------------------------------------");
+      RAND_INFO(" {} {} | Phase Fraction (Beta): {:.5f} | Total Moles: {:.5f}", phaseType, j, phase_frac, beta_j);
+      RAND_INFO("---------------------------------------------------------------------------");
+      RAND_INFO("  Idx | {:15} | {:>12} | {:>12}", "Component", "Mole Frac (x)", "Moles (n)");
+      RAND_INFO("------+-----------------+--------------+--------------");
 
       const auto& n_j = res.phases[j].state.moleNumbers;
       for (size_t i = 0; i < C; ++i) {
           double n_i = n_j[i];
           double x_i = (beta_j > 1e-20) ? (n_i / beta_j) : 0.0;
 
-          std::cout << "  " << std::setw(3) << i << " | "
-                    << std::left << std::setw(15) << compNames[i] << " | "
-                    << std::right << std::setw(12) << x_i << " | "
-                    << std::scientific << std::setprecision(4) << n_i << std::fixed << std::setprecision(5) << "\n";
+          RAND_INFO("  {:3} | {:15} | {:12.5f} | {:12.4e}", i, compNames[i], x_i, n_i);
       }
   }
-  std::cout << "===========================================================================\n\n";
+  RAND_INFO("===========================================================================\n");
 }
 
 // randflash::FlashResult RandFlash::solveTwoPhase(

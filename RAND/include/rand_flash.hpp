@@ -27,6 +27,7 @@ struct FlashInput {
 // 1) 默认保持现有行为：enable_stability_test=true 且不提供初值时自动做 stability analysis。
 // 2) 允许关闭 stability analysis，并强制指定相数（reaction 体系常见：固定相数后在元素守恒约束下做 Gibbs 最小化）。
 // 3) 允许用户给定初始相组成（此时无论 enable_stability_test 与否，均跳过 stability analysis）。
+// 4) 支持反应体系统一入口（is_reactive=true）。
 struct SolveOptions {
   // 是否启用相稳定性分析。
   // - true ：若未提供 initial_phase_compositions，则走原自动流程。
@@ -45,6 +46,18 @@ struct SolveOptions {
   // 初始相组成猜测（每行一个相的组成向量，需归一化或近似归一化）。
   // 非空时：直接按给定相数求解并跳过 stability analysis。
   std::vector<std::vector<double>> initial_phase_compositions;
+
+  // === 反应体系支持 ===
+  // 是否启用反应模式（元素守恒约束）
+  bool is_reactive = false;
+
+  // 反应体系自动相数判断（仅当 is_reactive=true 时有效）
+  // - true：自动确定相数（调用 solveReactiveAuto）
+  // - false：必须提供 forced_phase_count（调用 solveReactive）
+  bool auto_phase_count = false;
+
+  // 自动模式的最大相数（仅当 auto_phase_count=true 时有效）
+  int max_phases = 3;
 };
 
 struct PhaseFixOptions {

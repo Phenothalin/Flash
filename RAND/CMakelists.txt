@@ -30,6 +30,7 @@ target_link_libraries(randflash
       thermo
       phase_stability
       Eigen3::Eigen
+      spdlog::spdlog
 )
 
 # ===================== RAND 测试 =====================
