@@ -66,15 +66,16 @@ jobs:
           ls -la thermopack-src/build/ || true
 
       - name: Check exported symbols
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          $dll = Get-ChildItem -Path "thermopack-src/build" -Filter "*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($dll) {
-            Write-Host "=== Symbols in $($dll.Name) ==="
-            dumpbin /exports $dll.FullName | Select-String "eos" | Select-Object -First 20
-          } else {
-            Write-Host "No DLL found"
-          }
+          dll=$(find thermopack-src/build -name "*.dll" | head -1)
+          if [ -n "$dll" ]; then
+            echo "=== Symbols in $dll ==="
+            objdump -p "$dll" | grep -i "eos" | head -20 || echo "No eos symbols found"
+          else
+            echo "No DLL found"
+          fi
+        continue-on-error: true
 
       - name: Upload Windows libraries
         uses: actions/upload-artifact@v4
