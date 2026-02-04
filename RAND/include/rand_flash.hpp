@@ -156,15 +156,7 @@ public:
   RandFlash(thermo::IThermoBackend& thermo,
     ls::LinearSolverInterface& linearSolver);
 
-  // === 通用接口：自动相稳定性判别 + 初始化 + 相分裂 ===
-  // 若 initialPhaseCompositions 非空，则跳过相稳定性分析，按用户给定相数求解。
-  // MultiFlashResult solve(
-  //   const FlashInput& input,
-  //   const std::vector<std::vector<double>>& elementMatrix,
-  //   const std::vector<std::vector<double>>& initialPhaseCompositions = {},
-  //   int maxIterations = 50,
-  //   double tolerance = 1e-8);
-
+  // === 统一求解接口 ===
   // 新接口：通过 SolveOptions 控制是否执行 stability analysis / 是否强制相数。
   // 说明：
   // - opt.initial_phase_compositions 非空时：直接按给定相数求解（跳过 stability）。

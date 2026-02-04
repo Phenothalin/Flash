@@ -363,24 +363,6 @@ MultiFlashResult RandFlash::solveReactive(
     return res;
 }
 
-// ----------------------------------------------------------------------------------
-// 通用接口：自动相稳定性分析 -> 自动相数选择 -> 自动初始化 -> 相分裂
-// ----------------------------------------------------------------------------------
-// MultiFlashResult RandFlash::solve(
-//     const FlashInput& input,
-//     const std::vector<std::vector<double>>& elementMatrix,
-//     const std::vector<std::vector<double>>& initialPhaseCompositions,
-//     int maxIter,
-//     double tol)
-// {
-//     // Create SolveOptions and delegate to the new architecture
-//     SolveOptions opt;
-//     opt.enable_stability_test = true;
-//     opt.initial_phase_compositions = initialPhaseCompositions;
-//     opt.phase_determination_strategy = "fast";  // Use fast strategy for backward compatibility
-
-//     return solve(input, elementMatrix, opt, maxIter, tol);
-// }
 
 // ----------------------------------------------------------------------------------
 // 新接口：SolveOptions
