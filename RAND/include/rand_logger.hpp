@@ -6,7 +6,37 @@
 #include <spdlog/fmt/ostr.h>
 #include <memory>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX  // Prevent Windows.h from defining min/max macros
+#endif
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 namespace randflash {
+
+// Initialize console for UTF-8 output (Windows only)
+inline void initConsole() {
+#ifdef _WIN32
+    // Set console output to UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    // Set console input to UTF-8
+    SetConsoleCP(CP_UTF8);
+    // Enable buffering for better performance
+    setvbuf(stdout, nullptr, _IOFBF, 1000);
+    setvbuf(stderr, nullptr, _IOFBF, 1000);
+#endif
+}
+
+// Auto-initialize console on module load
+namespace detail {
+    struct ConsoleInitializer {
+        ConsoleInitializer() { initConsole(); }
+    };
+    static ConsoleInitializer console_init;
+}
 
 // Get the RAND module logger
 inline std::shared_ptr<spdlog::logger>& getLogger() {

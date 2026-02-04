@@ -1,84 +1,71 @@
-# Thermo 层：封装 thermopack，提供 C++ backend
+# ==============================================================================
+# Thermo Module: ThermoPack C++ Backend Wrapper
+# ==============================================================================
 
-# 收集源码和头文件（你可以改成手动列出）
-file(GLOB THERMO_SOURCES
-     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-)
-file(GLOB THERMO_HEADERS
-     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
-     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
-)
+# ------------------------------------------------------------------------------
+# Library Target
+# ------------------------------------------------------------------------------
 
+# Collect source files
+file(GLOB THERMO_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+file(GLOB THERMO_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
+
+# Create library (STATIC or INTERFACE depending on source availability)
 if(THERMO_SOURCES)
-  # 有 .cpp 的情况：正常生成静态库
-  add_library(thermo STATIC
-      ${THERMO_SOURCES}
-      ${THERMO_HEADERS}
-  )
+    # Static library with implementation
+    add_library(thermo STATIC ${THERMO_SOURCES} ${THERMO_HEADERS})
 
-  target_include_directories(thermo
-      PUBLIC
+    target_include_directories(thermo PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
+    )
 
-  target_link_libraries(thermo
-      PUBLIC
+    target_link_libraries(thermo PUBLIC
         thermopack
         Eigen3::Eigen
-  )
+    )
 else()
-  # 暂时没有源码：做成 header-only 的 INTERFACE 库
-  add_library(thermo INTERFACE)
+    # Header-only interface library
+    add_library(thermo INTERFACE)
 
-  target_include_directories(thermo
-      INTERFACE
+    target_include_directories(thermo INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
+    )
 
-  target_link_libraries(thermo
-      INTERFACE
+    target_link_libraries(thermo INTERFACE
         thermopack
         Eigen3::Eigen
-  )
+    )
 endif()
 
-# ===================== 测试程序 =====================
+# ------------------------------------------------------------------------------
+# Test Executables
+# ------------------------------------------------------------------------------
 
-# 1) 压缩因子 / 基本 EOS 测试
-add_executable(compressibility_factor_test
+# Helper function to create test executables
+function(add_thermo_test TEST_NAME SOURCE_FILE)
+    add_executable(${TEST_NAME} ${SOURCE_FILE})
+
+    target_include_directories(${TEST_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(${TEST_NAME} PRIVATE
+        thermopack
+        Eigen3::Eigen
+    )
+
+    set_thermopack_rpath(${TEST_NAME})
+endfunction()
+
+# Compressibility factor / Basic EOS test
+add_thermo_test(compressibility_factor_test
     tests/compressibility_factor_test.cpp
 )
 
-target_include_directories(compressibility_factor_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-target_link_libraries(compressibility_factor_test
-    PRIVATE
-      thermopack
-      Eigen3::Eigen
-)
-
-set_thermopack_rpath(compressibility_factor_test)
-
-# 2) ThermoPack sanity check（可开关）
+# ThermoPack sanity check (optional)
 if(BUILD_TP_SANITY_TEST)
-  add_executable(tp_thermo_check
-      tests/tp_thermo_check.cpp
-  )
-
-  target_include_directories(tp_thermo_check
-      PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-
-  target_link_libraries(tp_thermo_check
-      PRIVATE
-        thermopack
-        Eigen3::Eigen
-  )
-
-  # 设置 RPATH
-  set_thermopack_rpath(tp_thermo_check)
+    add_thermo_test(tp_thermo_check
+        tests/tp_thermo_check.cpp
+    )
 endif()

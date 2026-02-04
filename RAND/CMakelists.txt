@@ -1,146 +1,96 @@
-# RAND 层：RandFlash 多组分两相/多相闪蒸
+# ==============================================================================
+# RAND Module: Multi-Phase Flash Solver (RAND Algorithm)
+# ==============================================================================
 
+# ------------------------------------------------------------------------------
+# Library Target
+# ------------------------------------------------------------------------------
+
+# Explicitly list source files
 set(RAND_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/eigen.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_flash.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_init.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_solver.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/rand_utils.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/element_matrix_builder.cpp
+    src/eigen.cpp
+    src/rand_flash.cpp
+    src/rand_init.cpp
+    src/rand_solver.cpp
+    src/rand_utils.cpp
+    src/element_matrix_builder.cpp
 )
 
-file(GLOB RAND_HEADERS
-     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
-     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+# Collect header files
+file(GLOB RAND_HEADERS "include/*.hpp" "include/*.h")
+
+# Create static library
+add_library(randflash STATIC ${RAND_SOURCES} ${RAND_HEADERS})
+
+target_include_directories(randflash PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
 )
 
-add_library(randflash STATIC
-    ${RAND_SOURCES}
-    ${RAND_HEADERS}
+target_link_libraries(randflash PUBLIC
+    thermo
+    phase_stability
+    Eigen3::Eigen
+    spdlog::spdlog
 )
 
-target_include_directories(randflash
-    PUBLIC
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
+# ------------------------------------------------------------------------------
+# Test Executables
+# ------------------------------------------------------------------------------
 
-# RandFlash 依赖  Thermo（Thermo 再往下依赖 thermopack + Eigen）
-target_link_libraries(randflash
-    PUBLIC
-      thermo
-      phase_stability
-      Eigen3::Eigen
-      spdlog::spdlog
-)
+# Helper function to create test executables
+# Usage: add_rand_test(test_name source_file [USE_GTEST] [EXTRA_INCLUDES dir1 dir2...])
+function(add_rand_test TEST_NAME SOURCE_FILE)
+    # Parse optional arguments
+    set(options USE_GTEST)
+    set(multiValueArgs EXTRA_INCLUDES)
+    cmake_parse_arguments(ARG "${options}" "" "${multiValueArgs}" ${ARGN})
 
-# ===================== RAND 测试 =====================
+    add_executable(${TEST_NAME} ${SOURCE_FILE})
 
-add_executable(2phase_complex_test
-    tests/2phase_complex_test.cpp
-)
+    # Base include directories
+    set(INCLUDE_DIRS
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+    )
 
-target_include_directories(2phase_complex_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
+    # Add extra includes if specified
+    if(ARG_EXTRA_INCLUDES)
+        list(APPEND INCLUDE_DIRS ${ARG_EXTRA_INCLUDES})
+    endif()
 
-target_link_libraries(2phase_complex_test
-    PRIVATE
-      randflash
-)
+    target_include_directories(${TEST_NAME} PRIVATE ${INCLUDE_DIRS})
 
-set_thermopack_rpath(2phase_complex_test)
+    # Base libraries
+    set(LINK_LIBS randflash)
 
-add_executable(2phase_tests
-    tests/2phase_tests.cpp
-)
+    # Add GTest if requested
+    if(ARG_USE_GTEST)
+        list(APPEND LINK_LIBS GTest::gtest GTest::gtest_main)
+    endif()
 
-target_include_directories(2phase_tests
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
+    target_link_libraries(${TEST_NAME} PRIVATE ${LINK_LIBS})
 
-target_link_libraries(2phase_tests
-    PRIVATE
-      randflash
-      GTest::gtest
-      GTest::gtest_main
-)
+    # Set RPATH for dynamic library loading
+    set_thermopack_rpath(${TEST_NAME})
+endfunction()
 
-set_thermopack_rpath(2phase_tests)
+# ------------------------------------------------------------------------------
+# Test Targets
+# ------------------------------------------------------------------------------
 
-add_executable(3phase_rand_test
-    tests/3phase_rand_test.cpp
-)
+# Two-phase flash tests
+add_rand_test(2phase_complex_test tests/2phase_complex_test.cpp)
+add_rand_test(2phase_tests tests/2phase_tests.cpp USE_GTEST)
 
-target_include_directories(3phase_rand_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
+# Three-phase flash test
+add_rand_test(3phase_rand_test tests/3phase_rand_test.cpp)
 
-target_link_libraries(3phase_rand_test
-    PRIVATE
-      randflash
-)
+# Element matrix builder test
+add_rand_test(element_matrix_test tests/element_matrix_test.cpp USE_GTEST)
 
-set_thermopack_rpath(3phase_rand_test)
+# Reactive flash test
+add_rand_test(reactive_flash_test tests/reactive_flash_test.cpp USE_GTEST)
 
-add_executable(element_matrix_test
-    tests/element_matrix_test.cpp
-)
-
-target_include_directories(element_matrix_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-target_link_libraries(element_matrix_test
-    PRIVATE
-      randflash
-      GTest::gtest
-      GTest::gtest_main
-)
-
-set_thermopack_rpath(element_matrix_test)
-
-add_executable(reactive_flash_test
-    tests/reactive_flash_test.cpp
-)
-
-target_include_directories(reactive_flash_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
-
-target_link_libraries(reactive_flash_test
-    PRIVATE
-      randflash
-      GTest::gtest
-      GTest::gtest_main
-)
-
-set_thermopack_rpath(reactive_flash_test)
-
-add_executable(stable_method_test
-    tests/stable_method_test.cpp
-)
-
-target_include_directories(stable_method_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
-
-target_link_libraries(stable_method_test
-    PRIVATE
-      randflash
-      GTest::gtest
-      GTest::gtest_main
-)
-
-set_thermopack_rpath(stable_method_test)
+# Stable phase determination method test
+add_rand_test(stable_method_test tests/stable_method_test.cpp USE_GTEST)

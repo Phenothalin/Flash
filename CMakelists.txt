@@ -46,9 +46,16 @@ function(set_thermopack_rpath target_name)
       )
     elseif(WIN32)
       get_target_property(_TP_LIB thermopack IMPORTED_LOCATION)
+      get_filename_component(_TP_LIBDIR "${_TP_LIB}" DIRECTORY)
+      # Copy libthermopack.dll
       add_custom_command(TARGET ${target_name} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${_TP_LIB}" $<TARGET_FILE_DIR:${target_name}>
+      )
+      # Copy libopenblas.dll (OpenBLAS dependency)
+      add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_TP_LIBDIR}/libopenblas.dll" $<TARGET_FILE_DIR:${target_name}>
       )
     endif()
   endif()

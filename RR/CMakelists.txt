@@ -1,75 +1,60 @@
-# RR 层：Rachford–Rice 闪蒸
+# ==============================================================================
+# RR Module: Rachford-Rice Flash Solver
+# ==============================================================================
 
-file(GLOB RR_SOURCES
-     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-)
-file(GLOB RR_HEADERS
-     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
-     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
-)
+# ------------------------------------------------------------------------------
+# Library Target
+# ------------------------------------------------------------------------------
 
-add_library(rrflash STATIC
-    ${RR_SOURCES}
-    ${RR_HEADERS}
-)
+# Collect source files
+file(GLOB RR_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+file(GLOB RR_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 
-target_include_directories(rrflash
-    PUBLIC
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
-)
+# Create static library
+add_library(rrflash STATIC ${RR_SOURCES} ${RR_HEADERS})
 
-# RR 需要 thermo 和 phase_stability 库
-target_link_libraries(rrflash
-    PUBLIC
-      thermo
-      phase_stability
-      Eigen3::Eigen
+target_include_directories(rrflash PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
 )
 
-# ===================== RR 测试 =====================
+target_link_libraries(rrflash PUBLIC
+    thermo
+    phase_stability
+    Eigen3::Eigen
+)
 
-add_executable(RRflash_test
+# ------------------------------------------------------------------------------
+# Test Executables
+# ------------------------------------------------------------------------------
+
+# Helper function to create test executables
+function(add_rr_test TEST_NAME SOURCE_FILE)
+    add_executable(${TEST_NAME} ${SOURCE_FILE})
+
+    target_include_directories(${TEST_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
+    )
+
+    target_link_libraries(${TEST_NAME} PRIVATE
+        rrflash
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    set_thermopack_rpath(${TEST_NAME})
+endfunction()
+
+# Two-phase RR flash test
+add_rr_test(RRflash_test
     tests/RRflash_test.cpp
 )
 
-target_include_directories(RRflash_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-)
-
-target_link_libraries(RRflash_test
-    PRIVATE
-      rrflash
-      thermo
-      GTest::gtest
-      GTest::gtest_main
-)
-
-set_thermopack_rpath(RRflash_test)
-
-# ===================== VLL 三相测试 =====================
-
-add_executable(RR_vll_test
+# Three-phase VLL test
+add_rr_test(RR_vll_test
     tests/RR_vll_test.cpp
 )
-
-target_include_directories(RR_vll_test
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../Thermo/include
-      ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
-)
-
-target_link_libraries(RR_vll_test
-    PRIVATE
-      rrflash
-      thermo
-      phase_stability
-      GTest::gtest
-      GTest::gtest_main
-)
-
-set_thermopack_rpath(RR_vll_test)
