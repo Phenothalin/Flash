@@ -74,6 +74,14 @@ jobs:
           fi
         continue-on-error: true
 
+      - name: Copy OpenBLAS dependency
+        shell: msys2 {0}
+        run: |
+          mkdir -p thermopack-src/build/deps
+          cp /mingw64/bin/libopenblas.dll thermopack-src/build/deps/
+          echo "=== Copied OpenBLAS DLL ==="
+          ls -lh thermopack-src/build/deps/
+
       - name: Upload Windows libraries
         uses: actions/upload-artifact@v4
         with:
@@ -82,4 +90,5 @@ jobs:
             thermopack-src/build/**/*.dll
             thermopack-src/build/**/*.lib
             thermopack-src/build/**/*.a
+            thermopack-src/build/deps/*.dll
           if-no-files-found: warn

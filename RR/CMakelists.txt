@@ -48,6 +48,8 @@ target_link_libraries(RRflash_test
       GTest::gtest_main
 )
 
+set_thermopack_rpath(RRflash_test)
+
 # ===================== VLL 三相测试 =====================
 
 add_executable(RR_vll_test
@@ -69,3 +71,5 @@ target_link_libraries(RR_vll_test
       GTest::gtest
       GTest::gtest_main
 )
+
+set_thermopack_rpath(RR_vll_test)
