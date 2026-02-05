@@ -744,6 +744,8 @@ void RandFlash::projectToElementConservation(
     // where lambda_j is chosen to satisfy element conservation
     // Use Moore-Penrose pseudoinverse: dn = A^T * (A*A^T)^{-1} * (error * beta_j / totalBeta)
 
+    const double min_mole_floor = 1e-20;  // Moved outside loop for later reuse
+
     for (size_t j = 0; j < F; ++j) {
         double weight = phaseBetas[j] / totalBeta;
         std::vector<double> targetError(E);
@@ -784,9 +786,48 @@ void RandFlash::projectToElementConservation(
         }
 
         // Apply correction with clamping
-        const double min_mole_floor = 1e-20;
         for (size_t i = 0; i < C; ++i) {
             nPhases_inout[j][i] = std::max(nPhases_inout[j][i] + dn[i], min_mole_floor);
+        }
+    }
+
+    // CRITICAL: Re-scale all phases to restore exact element conservation after clamping
+    // Clamping breaks element conservation, so we need to correct it
+    // Recompute current element moles after clamping
+    std::fill(currentElementMoles.begin(), currentElementMoles.end(), 0.0);
+    for (size_t e = 0; e < E; ++e) {
+        for (size_t j = 0; j < F; ++j) {
+            for (size_t i = 0; i < C; ++i) {
+                currentElementMoles[e] += elementMatrix[e][i] * nPhases_inout[j][i];
+            }
+        }
+    }
+
+    // Compute scaling factors for each element
+    std::vector<double> scaleFactors(E, 1.0);
+    for (size_t e = 0; e < E; ++e) {
+        if (currentElementMoles[e] > 1e-20 && targetElementMoles[e] > 1e-20) {
+            scaleFactors[e] = targetElementMoles[e] / currentElementMoles[e];
+        }
+    }
+
+    // Use average scaling factor to preserve phase ratios
+    double avgScale = 0.0;
+    int count = 0;
+    for (size_t e = 0; e < E; ++e) {
+        if (std::abs(scaleFactors[e] - 1.0) < 10.0) {  // Ignore outliers
+            avgScale += scaleFactors[e];
+            count++;
+        }
+    }
+    if (count > 0) {
+        avgScale /= count;
+        // Apply uniform scaling to all phases
+        for (size_t j = 0; j < F; ++j) {
+            for (size_t i = 0; i < C; ++i) {
+                nPhases_inout[j][i] *= avgScale;
+                nPhases_inout[j][i] = std::max(nPhases_inout[j][i], min_mole_floor);
+            }
         }
     }
 

@@ -145,16 +145,21 @@ public:
     }
 
     Matrix matA = makeEigenMatrix(n, n, A);
+
+    // Try Cholesky factorization first (fast for positive definite matrices)
     Eigen::LLT<Matrix> llt(matA);
-    if (llt.info() != Eigen::Success) {
-      throw std::runtime_error("invertSPD: Cholesky factorization failed");
+    if (llt.info() == Eigen::Success) {
+      Matrix I = Matrix::Identity(n, n);
+      Matrix inv = llt.solve(I);
+      if (llt.info() == Eigen::Success) {
+        return toRowMajor(inv);
+      }
     }
 
+    // Fallback to SVD if Cholesky fails (more robust for near-singular matrices)
+    Eigen::JacobiSVD<Matrix> svd(matA, Eigen::ComputeThinU | Eigen::ComputeThinV);
     Matrix I = Matrix::Identity(n, n);
-    Matrix inv = llt.solve(I);
-    if (llt.info() != Eigen::Success) {
-      throw std::runtime_error("invertSPD: solve failed");
-    }
+    Matrix inv = svd.solve(I);
 
     return toRowMajor(inv);
   }
