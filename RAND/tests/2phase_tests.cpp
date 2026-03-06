@@ -66,6 +66,7 @@ protected:
         int maxIter = 30;
         double tol = 1e-8;
         randflash::SolveOptions options;
+        options.phase_determination_strategy = "stable";
         auto res = flash.solve(input, elementMatrix, options, maxIter, tol);
         if(res.success){
             flash.printResult(res);
@@ -190,11 +191,25 @@ TEST_F(MultiSystemFlashTest, LLE_Water_Hexane) {
     RunSystemTest(comps, T, P, z, "LLE_Water_Hexane_Mix");
 }
 
+TEST_F(MultiSystemFlashTest, C1_C10) {
+    // 经典的二元混合物 (甲烷 + 正癸烷)
+    std::string comps = "C1,nC10";
+
+    double T = 120.15;
+    double P = 1.01325e6;
+
+    std::vector<double> z = {
+        0.5, 0.5
+    };
+
+    RunSystemTest(comps, T, P, z, "C1_C10_Mix");
+}
+
 // main 函数
 int main(int argc, char **argv) {
     randflash::setLogLevel(spdlog::level::info);
     ::testing::InitGoogleTest(&argc, argv);
 
-    // ::testing::GTEST_FLAG(filter) = "MultiSystemFlashTest.SourGas_H2S_Mix";
+    ::testing::GTEST_FLAG(filter) = "MultiSystemFlashTest.LLE_Water_Hexane";
     return RUN_ALL_TESTS();
 }

@@ -673,48 +673,29 @@ InitResult RandFlash::initializeReactiveSinglePhase(
             ") does not match element matrix rows (" + std::to_string(E) + ")");
     }
 
-    // Solve least-squares problem using pseudoinverse: min ||n||^2 s.t. A·n = b, n ≥ 0
-    // Solution: n = A^T (A A^T)^{-1} b (minimum norm solution)
+    // NEW STRATEGY: Use feed composition as initial guess with small perturbations
+    // This avoids the uniform distribution trap that min-norm solution creates
 
     std::vector<double> n(C);
 
     // Minimum initial mole number to ensure all species can be generated
-    // This must be large enough to prevent the solver from immediately driving it to zero
-    const double MIN_INITIAL_MOLE = 1e-3;
+    const double MIN_INITIAL_MOLE = 1e-4;
 
-    // Build A A^T matrix (E x E)
-    std::vector<double> AAT(E * E, 0.0);
-    for (size_t e1 = 0; e1 < E; ++e1) {
-        for (size_t e2 = 0; e2 < E; ++e2) {
-            for (size_t i = 0; i < C; ++i) {
-                AAT[e1 * E + e2] += sys.elementMatrix[e1][i] * sys.elementMatrix[e2][i];
+    // Strategy 1: If feed has dominant species (max > 0.5), use feed-based initialization
+    double max_feed = *std::max_element(sys.feedMoles.begin(), sys.feedMoles.end());
+    double total_feed = std::accumulate(sys.feedMoles.begin(), sys.feedMoles.end(), 0.0);
+
+    if (max_feed > 0.5 * total_feed && total_feed > 1e-10) {
+        // Use feed composition as starting point (biased toward reactants/products)
+        RAND_DEBUG("[Init] Using feed-biased initialization for reactive single phase");
+        for (size_t i = 0; i < C; ++i) {
+            n[i] = sys.feedMoles[i];
+            if (n[i] < MIN_INITIAL_MOLE) {
+                n[i] = MIN_INITIAL_MOLE;
             }
         }
-    }
 
-    // Solve (A A^T) λ = elementMoles for element potentials λ
-    double residual = 0.0;
-    std::vector<double> lambda = linearSolver_.solveDense(E, AAT, elementMoles, &residual);
-
-    // Compute n = A^T λ (minimum norm solution)
-    for (size_t i = 0; i < C; ++i) {
-        n[i] = 0.0;
-        for (size_t e = 0; e < E; ++e) {
-            n[i] += sys.elementMatrix[e][i] * lambda[e];
-        }
-    }
-
-    // Non-negative projection: ensure all species have minimum positive values
-    // This is critical for reactive systems where species can be generated
-    double min_n = *std::min_element(n.begin(), n.end());
-    if (min_n < MIN_INITIAL_MOLE) {
-        // Shift all values to ensure minimum
-        double shift = MIN_INITIAL_MOLE - min_n;
-        for (double& ni : n) {
-            ni += shift;
-        }
-
-        // Re-scale to satisfy element conservation after shifting
+        // Scale to satisfy element conservation
         std::vector<double> b_computed(E, 0.0);
         for (size_t e = 0; e < E; ++e) {
             for (size_t i = 0; i < C; ++i) {
@@ -722,7 +703,7 @@ InitResult RandFlash::initializeReactiveSinglePhase(
             }
         }
 
-        // Find average scaling factor
+        // Find average scaling factor to match target element moles
         double scale = 0.0;
         int count = 0;
         for (size_t e = 0; e < E; ++e) {
@@ -738,6 +719,64 @@ InitResult RandFlash::initializeReactiveSinglePhase(
                 ni = std::max(ni, MIN_INITIAL_MOLE);
             }
         }
+    } else {
+        // Strategy 2: Fallback to min-norm solution for cases without dominant species
+        RAND_DEBUG("[Init] Using min-norm initialization for reactive single phase");
+
+        // Build A A^T matrix (E x E)
+        std::vector<double> AAT(E * E, 0.0);
+        for (size_t e1 = 0; e1 < E; ++e1) {
+            for (size_t e2 = 0; e2 < E; ++e2) {
+                for (size_t i = 0; i < C; ++i) {
+                    AAT[e1 * E + e2] += sys.elementMatrix[e1][i] * sys.elementMatrix[e2][i];
+                }
+            }
+        }
+
+        // Solve (A A^T) λ = elementMoles for element potentials λ
+        double residual = 0.0;
+        std::vector<double> lambda = linearSolver_.solveDense(E, AAT, elementMoles, &residual);
+
+        // Compute n = A^T λ (minimum norm solution)
+        for (size_t i = 0; i < C; ++i) {
+            n[i] = 0.0;
+            for (size_t e = 0; e < E; ++e) {
+                n[i] += sys.elementMatrix[e][i] * lambda[e];
+            }
+        }
+
+        // Non-negative projection: ensure all species have minimum positive values
+        double min_n = *std::min_element(n.begin(), n.end());
+        if (min_n < MIN_INITIAL_MOLE) {
+            double shift = MIN_INITIAL_MOLE - min_n;
+            for (double& ni : n) {
+                ni += shift;
+            }
+
+            // Re-scale to satisfy element conservation after shifting
+            std::vector<double> b_computed(E, 0.0);
+            for (size_t e = 0; e < E; ++e) {
+                for (size_t i = 0; i < C; ++i) {
+                    b_computed[e] += sys.elementMatrix[e][i] * n[i];
+                }
+            }
+
+            double scale = 0.0;
+            int count = 0;
+            for (size_t e = 0; e < E; ++e) {
+                if (b_computed[e] > 1e-20 && elementMoles[e] > 1e-20) {
+                    scale += elementMoles[e] / b_computed[e];
+                    count++;
+                }
+            }
+            if (count > 0) {
+                scale /= count;
+                for (double& ni : n) {
+                    ni *= scale;
+                    ni = std::max(ni, MIN_INITIAL_MOLE);
+                }
+            }
+        }
     }
 
     // Final safety check: ensure all moles are positive
@@ -751,6 +790,14 @@ InitResult RandFlash::initializeReactiveSinglePhase(
     for (size_t i = 0; i < C; ++i) {
         x[i] = n[i] / n_total;
     }
+
+    // Log initial composition for debugging
+    std::string comp_str;
+    for (size_t i = 0; i < C; ++i) {
+        if (i > 0) comp_str += ", ";
+        comp_str += fmt::format("{:.4f}", x[i]);
+    }
+    RAND_DEBUG("[Init] Initial composition: [{}]", comp_str);
 
     // Build result
     InitResult result;

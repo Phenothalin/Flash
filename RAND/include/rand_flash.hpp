@@ -332,7 +332,8 @@ private:
     const std::vector<std::vector<double>>& nPhases,
     const std::vector<double>& feedComposition,
     const std::vector<std::vector<double>>& dnPhases = {},  // New: step size for convergence check
-    bool isReactive = false) const;                          // New: flag for reactive systems
+    bool isReactive = false,                                 // New: flag for reactive systems
+    const std::vector<double>& Lambda = {}) const;           // New: element potentials for reactive equilibrium check
 
   // === 【新增】通用求解内核 ===
   // 所有的 Newton 迭代逻辑移到这里；solve() / solveTwoPhase() 只是包装。
@@ -366,6 +367,12 @@ private:
     const SystemContext& sys,
     const std::vector<double>& trialComposition,
     double currentGibbs, double& newGibbs) const;
+
+  // Detect if system is at a local minimum (uniform distribution)
+  // Used for reactive systems to detect when solver is stuck
+  bool isLikelyLocalMinimum(
+    const SystemContext& sys,
+    const std::vector<std::vector<double>>& elementMatrix) const;
 
   // === Stable phase determination methods ===
 

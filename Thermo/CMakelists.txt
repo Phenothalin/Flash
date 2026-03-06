@@ -69,3 +69,16 @@ if(BUILD_TP_SANITY_TEST)
         tests/tp_thermo_check.cpp
     )
 endif()
+
+# Gibbs energy verification test (requires randflash for element matrix)
+add_executable(verify_gibbs tests/verify_gibbs.cpp)
+target_include_directories(verify_gibbs PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/RAND/include
+)
+target_link_libraries(verify_gibbs PRIVATE
+    randflash
+    thermopack
+    Eigen3::Eigen
+)
+set_thermopack_rpath(verify_gibbs)

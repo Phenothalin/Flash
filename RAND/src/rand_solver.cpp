@@ -502,7 +502,9 @@ MultiFlashResult RandFlash::solveGeneral(
                 }
 
                 // Apply projection only if error exceeds threshold
-                const double projection_threshold = 1e-10;
+                // Use 1e-6 as threshold to match convergence criterion and avoid
+                // creating numerical noise that prevents convergence
+                const double projection_threshold = 1e-6;
                 if (elem_err > projection_threshold) {
                     RAND_DEBUG("  [Conservation] Element error {:.6e} > threshold, applying projection", elem_err);
                     projectToElementConservation(sys.elementMatrix, targetElementMoles, currentNs);
@@ -512,12 +514,12 @@ MultiFlashResult RandFlash::solveGeneral(
 
             // 5) Phase pruning/merge after update (handles beta->0 degeneracy)
             // 对于反应体系，禁用相合并以保持元素守恒
-            // if (!isReactive) {
-            //     const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
-            //     if (changed) {
-            //         RAND_DEBUG("[PhasePrune] Active phases changed -> F={}", sys.phases.size());
-            //     }
-            // }
+            if (!isReactive) {
+                const bool changed = prune_and_merge_phases(sys, beta_rel_prune, beta_abs_prune, l1_merge_tol, /*verbose*/false);
+                if (changed) {
+                    RAND_DEBUG("[PhasePrune] Active phases changed -> F={}", sys.phases.size());
+                }
+            }
 
             // 6) Recompute mu for convergence check using the UPDATED state
             F = sys.phases.size();
@@ -532,7 +534,7 @@ MultiFlashResult RandFlash::solveGeneral(
             auto conv = checkConvergence(
                 iter + 1, tol, sys.temperature,
                 mus_post, sys.elementMatrix, n_post, sys.feedMoles,
-                dnPhases, isReactive);
+                dnPhases, isReactive, Lambda);
 
             if (conv.converged) {
                 result.success = true;
@@ -553,6 +555,16 @@ MultiFlashResult RandFlash::solveGeneral(
 
     result.success = false;
     result.phases = sys.phases;  // 保存当前状态
+
+    // Check for local minimum trap in reactive single-phase systems
+    if (isReactive && sys.phases.size() == 1 && !sys.elementMatrix.empty()) {
+        if (isLikelyLocalMinimum(sys, sys.elementMatrix)) {
+            RAND_INFO("WARNING: Solver appears trapped at local minimum (uniform distribution).");
+            RAND_INFO("This occurs because PR/SRK EOS lacks standard Gibbs formation energies.");
+            RAND_INFO("Consider using a thermodynamic model with ΔG_f° for reactive equilibrium.");
+        }
+    }
+
     return result;
 }
 

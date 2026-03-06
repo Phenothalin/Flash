@@ -924,7 +924,8 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
   const std::vector<std::vector<double>>& nPhases, // 注意：这里需要传入 nPhases 或 compositions
   const std::vector<double>& feedComposition,
   const std::vector<std::vector<double>>& dnPhases,  // New: step size for convergence check
-  bool isReactive) const                              // New: flag for reactive systems
+  bool isReactive,                                    // New: flag for reactive systems
+  const std::vector<double>& Lambda) const            // New: element potentials for reactive equilibrium check
 {
   RandFlash::ConvergenceInfo info{};
   const double RT = R_CONST * temperature;
@@ -976,7 +977,7 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
       elem_err = std::max(elem_err, std::abs(sum_n_ell - sum_feed_ell));
   }
 
-  // 3) 计算相对步长范数（用于单相反应体系）
+  // 3) 计算相对步长范数（用于单相反应体系的辅助判据）
   double relative_step_norm = 0.0;
   if (!dnPhases.empty() && dnPhases.size() == F) {
       double step_norm = 0.0, n_norm = 0.0;
@@ -991,9 +992,27 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
       relative_step_norm = (n_norm > 1e-20) ? std::sqrt(step_norm / n_norm) : 0.0;
   }
 
+  //  4) 对于反应体系单相，计算化学平衡残差
+  //    NOTE: For reactive single-phase systems, the equilibrium condition μ_i - Σλ_e A_e,i = 0
+  //    is satisfied at ANY stationary point (including local minima) due to KKT conditions.
+  //    This makes it unsuitable as a convergence criterion - it cannot distinguish between
+  //    local and global minima. We use step-norm instead, which checks if the system is
+  //    still evolving.
+  double max_equilibrium_residual = 0.0;
+  if (isReactive && F == 1 && !Lambda.empty() && E > 0) {
+      for (size_t i = 0; i < C; ++i) {
+          double mu_reduced = mus[0][i];
+          for (size_t e = 0; e < E; ++e) {
+              mu_reduced -= Lambda[e] * elementMatrix[e][i];
+          }
+          double residual = std::fabs(mu_reduced) / RT;
+          max_equilibrium_residual = std::max(max_equilibrium_residual, residual);
+      }
+  }
+
   if (isReactive && F == 1) {
-      RAND_DEBUG("Iter {} | max_mu/RT_diff (filtered): {} | elem_err: {} | relative_step_norm: {}",
-                iternumber, max_mu_diff, elem_err, relative_step_norm);
+      RAND_DEBUG("Iter {} | max_equilibrium_residual: {:.6e} | max_mu/RT_diff (filtered): {} | elem_err: {} | relative_step_norm: {}",
+                iternumber, max_equilibrium_residual, max_mu_diff, elem_err, relative_step_norm);
   } else {
       RAND_DEBUG("Iter {} | max_mu/RT_diff (filtered): {} | elem_err: {}",
                 iternumber, max_mu_diff, elem_err);
@@ -1005,6 +1024,8 @@ RandFlash::ConvergenceInfo RandFlash::checkConvergence(
 
   // 收敛判断：
   // - 单相反应体系：使用步长判据
+  //   理由：平衡残差 μ_i - Σλ_e A_e,i = 0 在局部最小值也满足（KKT条件），
+  //   无法区分全局和局部最小值。步长准则检查系统是否仍在演化。
   // - 多相或非反应体系：使用化学势差判据
   if (isReactive && F == 1) {
       info.converged = (relative_step_norm < tol && elem_err < 1e-5);
@@ -1231,6 +1252,37 @@ bool RandFlash::checkPhaseSplitBenefit(
     // Full implementation will be added in solveReactiveAuto
     newGibbs = currentGibbs;
     return false;
+}
+
+bool RandFlash::isLikelyLocalMinimum(
+    const SystemContext& sys,
+    const std::vector<std::vector<double>>& elementMatrix) const
+{
+    // Only applicable to single-phase reactive systems
+    if (sys.phases.size() != 1) return false;
+    if (elementMatrix.empty()) return false;
+
+    const auto& n = sys.phases[0].state.moleNumbers;
+    const size_t C = n.size();
+    if (C < 2) return false;
+
+    // Compute total moles
+    double total = 0.0;
+    for (double ni : n) total += ni;
+    if (total < 1e-20) return false;
+
+    // Check if all mole fractions are close to 1/C (uniform distribution)
+    const double expected_uniform = 1.0 / static_cast<double>(C);
+    const double tolerance = 0.15;  // 15% tolerance
+
+    for (size_t i = 0; i < C; ++i) {
+        double xi = n[i] / total;
+        if (std::abs(xi - expected_uniform) > tolerance) {
+            return false;  // Not uniform
+        }
+    }
+
+    return true;  // Uniform distribution detected
 }
 
 // ========== Stable Phase Determination Methods ==========
