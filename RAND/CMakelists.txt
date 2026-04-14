@@ -94,3 +94,21 @@ add_rand_test(reactive_flash_test tests/reactive_flash_test.cpp USE_GTEST)
 
 # Stable phase determination method test
 add_rand_test(stable_method_test tests/stable_method_test.cpp USE_GTEST)
+
+# Patent example test
+add_rand_test(patent_example_test tests/patent_example_test.cpp USE_GTEST)
+
+# Thesis data collection test
+add_rand_test(thesis_data1 tests/thesis_data1.cpp USE_GTEST)
+
+# Case 8 T-P sweep test
+add_rand_test(rand_case8_sweep tests/case8_sweep_test.cpp USE_GTEST)
+
+# Phase determination test
+add_rand_test(phase_determination_test tests/phase_determination_test.cpp USE_GTEST)
+
+# Comparison test (Cases 23-26)
+add_rand_test(comparison_test tests/comparison_test.cpp USE_GTEST)
+
+# T-xy diagram: C2+C3, SRK, 10 bar
+add_rand_test(rand_txy_c2c3_test tests/txy_c2c3_test.cpp USE_GTEST)

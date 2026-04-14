@@ -1,4 +1,5 @@
 #include "RR_vl.hpp"
+#include "rr_logger.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -49,11 +50,26 @@ auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
     double fx_value = func(x_value);
     double dfx_value = func_deriv(x_value);
 
-    if (std::abs(dfx_value) < 1e-15) {
-      throw std::runtime_error("牛顿-拉夫逊方法中遇到零导数。");
+    // 改进：放宽导数阈值，并在导数很小时使用更小的步长
+    if (std::abs(dfx_value) < 1e-10) {
+      // 当导数很小时，尝试使用梯度下降步
+      double step = -fx_value * 0.01;  // 小步长
+      x_value += step;
+      if (std::abs(step) < tol) {
+        return x_value;
+      }
+      continue;
     }
 
-    double x_new = x_value - (fx_value / dfx_value);
+    double step = -fx_value / dfx_value;
+
+    // 限制步长，避免过大的跳跃
+    const double max_step = 0.5;
+    if (std::abs(step) > max_step) {
+      step = step > 0 ? max_step : -max_step;
+    }
+
+    double x_new = x_value + step;
 
     if (std::abs(x_new - x_value) < tol) {
       return x_new;
@@ -219,7 +235,7 @@ auto Flash::updateKValues(const std::vector<double> &phi_liquid,
 
 // 多相扩展接口预留
 void Flash::proposeNewPhaseByStabilityAnalysis() {
-  std::cout << "稳定性分析接口预留，未实现。\n";
+  RR_INFO("稳定性分析接口预留，未实现。");
 }
 
 // 通用结果显示方法
@@ -247,6 +263,49 @@ void Flash::displayResults() const {
     }
   }
 }
+
+// Print formatted 2-phase flash results
+void Flash::printResult() const {
+  auto compNames = thermo_backend_.getComponentNames();
+
+  RR_INFO("\n============================== RR Flash Results ==============================");
+  RR_INFO("Temperature: {:.2f} K", temperature_);
+  RR_INFO("Pressure:    {:.2f} Pa", pressure_);
+
+  std::string flashTypeStr;
+  if (flash_type_ == FlashType::PT) flashTypeStr = "PT";
+  else if (flash_type_ == FlashType::PV) flashTypeStr = "PV";
+  else if (flash_type_ == FlashType::TV) flashTypeStr = "TV";
+  RR_INFO("Flash Type:  {}", flashTypeStr);
+
+  double beta_v = vapor_fraction_;
+  double beta_l = 1.0 - beta_v;
+
+  RR_INFO("\n---------------------------------------------------------------------------");
+  RR_INFO(" Vapor Phase | Phase Fraction (Beta): {:.5f}", beta_v);
+  RR_INFO("---------------------------------------------------------------------------");
+  RR_INFO("  Idx | {:15} | {:>12}", "Component", "Mole Frac (y)");
+  RR_INFO("------+-----------------+--------------");
+
+  for (size_t i = 0; i < vap_comp_frac_.size(); ++i) {
+    std::string compName = (i < compNames.size()) ? compNames[i] : "Unknown";
+    RR_INFO("  {:3} | {:15} | {:12.5f}", i, compName, vap_comp_frac_[i]);
+  }
+
+  RR_INFO("\n---------------------------------------------------------------------------");
+  RR_INFO(" Liquid Phase | Phase Fraction (Beta): {:.5f}", beta_l);
+  RR_INFO("---------------------------------------------------------------------------");
+  RR_INFO("  Idx | {:15} | {:>12}", "Component", "Mole Frac (x)");
+  RR_INFO("------+-----------------+--------------");
+
+  for (size_t i = 0; i < liq_comp_frac_.size(); ++i) {
+    std::string compName = (i < compNames.size()) ? compNames[i] : "Unknown";
+    RR_INFO("  {:3} | {:15} | {:12.5f}", i, compName, liq_comp_frac_[i]);
+  }
+
+  RR_INFO("===========================================================================\n");
+}
+
 // 派生类 PTFlash 的构造函数 - 简化版
 PTFlash::PTFlash(double pressure, double temperature,
                  const std::vector<double> &composition,
@@ -274,7 +333,7 @@ void PTFlash::calculate(ConvergenceMethod method) {
 
 // PTFlash 的 calculateVaporFraction 方法
 void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
-  std::cout << "计算PT闪蒸的气相分率...\n";
+  RR_INFO("计算PT闪蒸的气相分率...");
 
   // 设置外部迭代参数
   const int MAX_OUTER_ITERATIONS = 100;
@@ -292,7 +351,7 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
   case ConvergenceMethod::NEWTON_RAPHSON: {
     for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
     {
-      std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+      RR_DEBUG("外部迭代 {}", outer_iter + 1);
 
       auto rr_func = [&](double vapfrac) -> double {
         return calculateRachfordRice(vapfrac, k_current);
@@ -362,10 +421,30 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
       double f2 = calculateRachfordRiceSecondDeriv(v_current, k_current);
 
       double denom = (2.0 * f1 * f1 - f * f2);
-      if (std::abs(denom) < 1e-12)
-        throw std::runtime_error("Halley分母接近零。");
+      double v_new;
 
-      double v_new = v_current - (2.0 * f * f1) / denom;
+      // 当分母接近零时，退化为Newton方法
+      if (std::abs(denom) < 1e-10) {
+        // 使用Newton步
+        if (std::abs(f1) > 1e-10) {
+          v_new = v_current - f / f1;
+        } else {
+          // 如果导数也很小，使用小步长梯度下降
+          v_new = v_current - f * 0.01;
+        }
+      } else {
+        // 使用Halley步
+        v_new = v_current - (2.0 * f * f1) / denom;
+      }
+
+      // 限制步长，避免过大的跳跃
+      double step = v_new - v_current;
+      const double max_step = 0.3;
+      if (std::abs(step) > max_step) {
+        step = step > 0 ? max_step : -max_step;
+        v_new = v_current + step;
+      }
+
       v_new = std::min(std::max(v_new, 1e-6), 1 - 1e-6);
 
       // 2. 计算新的气液相组成
@@ -382,7 +461,7 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
               thermo::PhaseState{temperature_, pressure_, vap_comp_frac_,
                                  thermo_backend_.vaporPhaseFlag()});
       k_current = updateKValues(phi_liquid, phi_vapor); // 必须添加这一步
-    std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+    RR_DEBUG("外部迭代 {}", outer_iter + 1);
       // 4. 检查收敛（此时k_current已更新，比较有效）
       if (checkConvergence(k_current, k_previous, v_new, v_current, TOL_OUTER,
                            outer_iter))
@@ -465,15 +544,13 @@ auto PTFlash::checkConvergence(const std::vector<double> &k_current,
   double v_diff = std::abs(v_new - v_current);
 
   // 输出迭代信息，帮助监控收敛过程
-  std::cout << " K的最大差异: " << max_k_diff << "\n"
-            << " V的差异: " << v_diff << "\n";
+  RR_DEBUG("K的最大差异: {:.4e}, V的差异: {:.4e}", max_k_diff, v_diff);
 
   // 检查是否满足收敛条件
   if (max_k_diff < TOL_OUTER && v_diff < TOL_OUTER)
   {
-    std::cout << outer_iter + 1 << " 次外部迭代后收敛。\n";
-
-    // 更新气相分数
+    RR_INFO("PT闪蒸收敛，迭代次数: ", outer_iter + 1);
+    iterations_ = outer_iter + 1;
     vapor_fraction_ = v_new;
     return true; // 表示已收敛
   }
@@ -499,7 +576,7 @@ PVFlash::PVFlash(double pressure, double vapor_fraction,
   if (std::isnan(initial_T_))
   {
     initializeTWithWilson(pressure_);
-    std::cout << "使用Wilson方法初始化温度: " << initial_T_ << '\n';
+    RR_INFO("使用Wilson方法初始化温度: {:.2f} K", initial_T_);
   }
 
   // 如果未提供初始K值，则计算
@@ -516,7 +593,7 @@ void PVFlash::calculate(ConvergenceMethod method) {
 
 // PVFlash 的 calculateTemperature 方法
 void PVFlash::calculateTemperature(ConvergenceMethod method) {
-  std::cout << "计算PV闪蒸的温度...\n";
+  RR_INFO("计算PV闪蒸的温度...");
 
   // 设置迭代参数
   const int MAX_OUTER_ITERATIONS = 100;
@@ -531,16 +608,16 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
   case ConvergenceMethod::NEWTON_RAPHSON: {
     for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
     {
-      std::cout << "迭代次数 " << outer_iter + 1 << ":\n";
+      RR_DEBUG("迭代次数 {}", outer_iter + 1);
 
       vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
       liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
 
       double err =
           calculateRachfordRice(k_current, vapor_fraction_, composition_);
-      std::cout << "    Rachford-Rice 方程误差: " << err << "\n";
+      RR_DEBUG("Rachford-Rice 方程误差: {:.4e}", err);
       double derr = calculateRachfordRiceDeriv(T_current, k_current);
-      std::cout << "    Rachford-Rice 方程导数: " << derr << "\n";
+      RR_DEBUG("Rachford-Rice 方程导数: {:.4e}", derr);
       T_current = updateTemperature(T_current, err, derr);
       // 使用牛顿-拉夫逊求解器求解温度 T
 
@@ -591,7 +668,7 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
 
     for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
     {
-      std::cout << "迭代次数 " << outer_iter + 1 << ":\n";
+      RR_DEBUG("迭代次数 {}", outer_iter + 1);
 
       // 1) 计算 f, f', f''（中心差分，数值稳定）
       const double eps = std::max(1e-3, std::abs(T_current) * 1e-4);
@@ -649,8 +726,7 @@ void PVFlash::calculateTemperature(ConvergenceMethod method) {
         return;
       }
 
-      std::cout << "T_old : " << T_previous << "    T_new : " << T_current
-                << "\n";
+      RR_DEBUG("T_old: {:.2f} K, T_new: {:.2f} K", T_previous, T_current);
     }
 
     throw std::runtime_error("Halley方法未收敛");
@@ -796,7 +872,7 @@ auto PVFlash::updateTemperature(const double &T, const double &err,
   // 物理下界保护，避免被错误步拉到极低温
   T_new = std::max(T_new, 150.0); // 也可用系统最小可用温度
 
-  std::cout << "T_old : " << T << "    T_new : " << T_new << "\n";
+  RR_DEBUG("T_old: {:.2f} K, T_new: {:.2f} K", T, T_new);
   return T_new;
 }
 
@@ -815,13 +891,12 @@ auto PVFlash::checkConvergence(const std::vector<double> &k_current,
   }
   double diff_T = std::abs(T_current - T_previous);
   // 输出迭代信息，监控收敛过程
-  std::cout << " K的最大差异: " << max_k_diff << "\n";
-  std::cout << " T的差异: " << diff_T << "\n";
+  RR_DEBUG("K的最大差异: {:.4e}, T的差异: {:.4e}", max_k_diff, diff_T);
 
   // 判断是否满足收敛条件
   if (max_k_diff < 1e-6 && diff_T < 1e-3)
   {
-    std::cout << outer_iter + 1 << " 次外部迭代后收敛。\n";
+    RR_INFO("PV闪蒸收敛，迭代次数: {}", outer_iter + 1);
     return true;
   }
   return false;
@@ -846,7 +921,7 @@ TVFlash::TVFlash(double temperature, double vapor_fraction,
   if (std::isnan(initial_P_))
   {
     initializePWithWilson(temperature_);
-    std::cout << "使用Wilson方法初始化压力: " << initial_P_ << '\n';
+    RR_INFO("使用Wilson方法初始化压力: {:.2f} Pa", initial_P_);
   }
 
   // 如果未提供初始K值，则计算
@@ -861,7 +936,7 @@ void TVFlash::calculate(ConvergenceMethod method) { calculatePressure(method); }
 
 // TVFlash 的 calculatePressure 方法
 void TVFlash::calculatePressure(ConvergenceMethod method) {
-  std::cout << "计算TV闪蒸的压力...\n";
+  RR_INFO("计算TV闪蒸的压力...");
 
   // 设置迭代参数
   const int MAX_OUTER_ITERATIONS = 100;
@@ -876,7 +951,7 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
   case ConvergenceMethod::NEWTON_RAPHSON: {
     for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter)
     {
-      std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+      RR_DEBUG("外部迭代 {}", outer_iter + 1);
       vap_comp_frac_ = computeVapCompFractions(vapor_fraction_, k_current);
       liq_comp_frac_ = computeLiqCompFractions(vapor_fraction_, k_current);
 
@@ -921,7 +996,7 @@ void TVFlash::calculatePressure(ConvergenceMethod method) {
     };
   
     for (int outer_iter = 0; outer_iter < MAX_OUTER_ITERATIONS; ++outer_iter) {
-      std::cout << "外部迭代 " << outer_iter + 1 << ":\n";
+      RR_DEBUG("外部迭代 {}", outer_iter + 1);
       const double eps = std::max(1e3, std::abs(P_current) * 1e-4);
       const double f0 = f_at_P(P_current);
       const double f_p = f_at_P(P_current + eps);
@@ -1094,7 +1169,7 @@ auto TVFlash::updatePressure(const double &P, const double &err, const double &d
   }
   if (P_new <= 1.0) P_new = std::max(0.5 * P, 1.0); // 物理下界保护
 
-  std::cout << "P_old : " << P << "    P_new : " << P_new << "\n";
+  RR_DEBUG("P_old: {:.2f} Pa, P_new: {:.2f} Pa", P, P_new);
   return P_new;
 }
 
@@ -1114,13 +1189,12 @@ auto TVFlash::checkConvergence(const std::vector<double> &k_current,
   }
   double diff_P = std::abs(P_current - P_previous) / P_current;
   // 输出迭代信息，监控收敛过程
-  std::cout << " K的最大差异: " << max_k_diff << "\n";
-  std::cout << " P的相对差异: " << diff_P << "\n";
+  RR_DEBUG("K的最大差异: {:.4e}, P的相对差异: {:.4e}", max_k_diff, diff_P);
 
   // 判断是否满足收敛条件
   if (max_k_diff < 1e-6 && diff_P < 1e-3)
   {
-    std::cout << outer_iter + 1 << " 次外部迭代后收敛。\n";
+    RR_INFO("TV闪蒸收敛，迭代次数: {}", outer_iter + 1);
     return true;
   }
   return false;

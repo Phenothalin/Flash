@@ -20,10 +20,13 @@ target_include_directories(rrflash PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseStability/include
 )
 
+find_package(spdlog CONFIG REQUIRED)
+
 target_link_libraries(rrflash PUBLIC
     thermo
     phase_stability
     Eigen3::Eigen
+    spdlog::spdlog
 )
 
 # ------------------------------------------------------------------------------
@@ -57,4 +60,19 @@ add_rr_test(RRflash_test
 # Three-phase VLL test
 add_rr_test(RR_vll_test
     tests/RR_vll_test.cpp
+)
+
+# Thesis data collection test
+add_rr_test(thesis_data2
+    tests/thesis_data2.cpp
+)
+
+# Case 8 T-P sweep test
+add_rr_test(case8_sweep_test
+    tests/case8_sweep_test.cpp
+)
+
+# T-xy diagram: C2+C3, SRK, 10 bar
+add_rr_test(txy_c2c3_test
+    tests/txy_c2c3_test.cpp
 )

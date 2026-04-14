@@ -35,6 +35,7 @@ protected:
   std::vector<double> liq_comp_frac_;
   thermo::IThermoBackend &thermo_backend_;
   FlashType flash_type_;
+  int iterations_ = 0;
 
 public:
   Flash(const std::vector<double> &composition,
@@ -57,6 +58,9 @@ public:
                                     const std::vector<double> &phi_vapor);
   void displayResults() const;
 
+  // Print formatted 2-phase flash results
+  void printResult() const;
+
   // 多相扩展接口（预留）
   virtual void proposeNewPhaseByStabilityAnalysis();
 
@@ -68,6 +72,7 @@ public:
   }
   [[nodiscard]] auto getTemperature() const -> double { return temperature_; }
   [[nodiscard]] auto getPressure() const -> double { return pressure_; }
+  [[nodiscard]] auto getIterations() const -> int { return iterations_; }
   auto getVapComp() -> std::vector<double> { return vap_comp_frac_; }
   auto getLiqComp() -> std::vector<double> { return liq_comp_frac_; }
 };

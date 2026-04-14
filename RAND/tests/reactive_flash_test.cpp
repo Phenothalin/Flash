@@ -376,8 +376,8 @@ TEST_F(ReactiveFlashTest, EthaneCracking) {
 }
 
 int main(int argc, char** argv) {
-    randflash::setLogLevel(spdlog::level::debug);
+    randflash::setLogLevel(spdlog::level::info);
     ::testing::InitGoogleTest(&argc, argv);
-    ::testing::GTEST_FLAG(filter) = "ReactiveFlashTest.EthaneCracking";
+    // ::testing::GTEST_FLAG(filter) = "ReactiveFlashTest.EthaneCracking";
     return RUN_ALL_TESTS();
 }

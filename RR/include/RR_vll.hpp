@@ -46,6 +46,9 @@ public:
   // 执行三相闪蒸计算
   VLLResult calculate(double tolerance = 1e-6, int max_iterations = 100);
 
+  // Print formatted 3-phase flash results
+  void printResult(const VLLResult& result) const;
+
 private:
   // 输入参数
   double P_;
