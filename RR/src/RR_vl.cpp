@@ -43,12 +43,16 @@
 auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
                                 const std::function<double(double)> &func_deriv,
                                 double initial_guess, double tol,
-                                int max_iter) -> double {
+                                int max_iter,
+                                std::vector<double> *residual_history) -> double {
   double x_value = initial_guess;
 
   for (int iter = 0; iter < max_iter; ++iter) {
     double fx_value = func(x_value);
     double dfx_value = func_deriv(x_value);
+    if (residual_history != nullptr) {
+      residual_history->push_back(std::abs(fx_value));
+    }
 
     // 改进：放宽导数阈值，并在导数很小时使用更小的步长
     if (std::abs(dfx_value) < 1e-10) {
@@ -56,6 +60,9 @@ auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
       double step = -fx_value * 0.01;  // 小步长
       x_value += step;
       if (std::abs(step) < tol) {
+        if (residual_history != nullptr) {
+          residual_history->push_back(std::abs(func(x_value)));
+        }
         return x_value;
       }
       continue;
@@ -72,6 +79,9 @@ auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
     double x_new = x_value + step;
 
     if (std::abs(x_new - x_value) < tol) {
+      if (residual_history != nullptr) {
+        residual_history->push_back(std::abs(func(x_new)));
+      }
       return x_new;
     }
 
@@ -79,6 +89,9 @@ auto NewtonRaphsonSolver::solve(const std::function<double(double)> &func,
   }
 
   // 如果未收敛，返回最后的值（而不是抛出异常）
+  if (residual_history != nullptr) {
+    residual_history->push_back(std::abs(func(x_value)));
+  }
   return x_value;
 }
 
@@ -345,6 +358,10 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
   std::vector<double> k_previous = initial_k_;
 
   double v_current = initial_V_; // 使用初始气相分率估计
+  iter_k_history.clear();
+  iter_beta_residual_history.clear();
+  outer_inner_start_indices.clear();
+  outer_inner_counts.clear();
 
   switch (method)
   {
@@ -359,9 +376,23 @@ void PTFlash::calculateVaporFraction(ConvergenceMethod method) {
       auto rr_deriv = [&](double vapfrac) -> double {
         return calculateRachfordRiceDeriv(vapfrac, k_current);
       };
+      std::vector<double> inner_residuals;
+      outer_inner_start_indices.push_back(
+          static_cast<int>(iter_beta_residual_history.size()));
       // 使用牛顿-拉夫逊求解器求解 V
       double v_new = NewtonRaphsonSolver::solve(rr_func, rr_deriv, v_current,
-                                                TOL_INNER, 100);
+                                                TOL_INNER, 100, &inner_residuals);
+      outer_inner_counts.push_back(static_cast<int>(inner_residuals.size()));
+      iter_beta_residual_history.insert(iter_beta_residual_history.end(),
+                                        inner_residuals.begin(),
+                                        inner_residuals.end());
+      for (size_t inner_iter = 0; inner_iter < inner_residuals.size(); ++inner_iter) {
+        RR_DEBUG("Inner Newton residual | outer={} local={} global={} | beta_res={:.4e}",
+                 outer_iter + 1,
+                 inner_iter + 1,
+                 iter_beta_residual_history.size() - inner_residuals.size() + inner_iter + 1,
+                 inner_residuals[inner_iter]);
+      }
       v_new = v_new > 1 ? 0.9999 : v_new;
       v_new = v_new < 0 ? 0.0001 : v_new;
       if ((v_new == 0.9999 || v_new == 0.0001) && outer_iter > 20)
@@ -545,6 +576,8 @@ auto PTFlash::checkConvergence(const std::vector<double> &k_current,
 
   // 输出迭代信息，帮助监控收敛过程
   RR_DEBUG("K的最大差异: {:.4e}, V的差异: {:.4e}", max_k_diff, v_diff);
+
+  iter_k_history.push_back(max_k_diff);
 
   // 检查是否满足收敛条件
   if (max_k_diff < TOL_OUTER && v_diff < TOL_OUTER)

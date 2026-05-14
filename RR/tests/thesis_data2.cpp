@@ -6,13 +6,39 @@
 #include <fstream>
 #include <iomanip>
 #include <chrono>
+#include <iostream>
 
 static const std::string CSV_PATH = "/Users/madao/Desktop/2606/thesis_data/rr_results.csv";
 static const std::string LOG_PATH = "/Users/madao/Desktop/2606/thesis_data/rr_detailed.log";
+static const std::string ITER_CSV = "/Users/madao/Desktop/2606/thesis_data/rr_iter_history.csv";
+static const std::string INNER_ITER_CSV = "/Users/madao/Desktop/2606/thesis_data/rr_inner_beta_history.csv";
 
 class RRThesisTest : public ::testing::Test {
 protected:
     std::ofstream csv;
+
+    void printInnerBetaHistory(const std::string& cas,
+                               const std::vector<double>& inner_beta_history,
+                               const std::vector<int>& inner_start_indices,
+                               const std::vector<int>& inner_counts) {
+        if (inner_start_indices.size() != inner_counts.size()) return;
+        for (size_t outer = 0; outer < inner_counts.size(); ++outer) {
+            int start = inner_start_indices[outer];
+            int count = inner_counts[outer];
+            for (int local = 0; local < count; ++local) {
+                int global = start + local;
+                if (global >= 0 &&
+                    global < static_cast<int>(inner_beta_history.size())) {
+                    std::cout << "INNER_BETA " << cas
+                              << " outer=" << (outer + 1)
+                              << " local=" << (local + 1)
+                              << " global=" << (global + 1)
+                              << " beta_res=" << inner_beta_history[global]
+                              << "\n";
+                }
+            }
+        }
+    }
 
     void SetUp() override {
         std::ifstream check(CSV_PATH);
@@ -21,15 +47,56 @@ protected:
         csv.open(CSV_PATH, std::ios::app);
         if (!exists)
             csv << "Case,System,T_K,P_bar,Method,Beta,Iterations,Time_us,Status\n";
+
+        std::ifstream check2(ITER_CSV);
+        bool iter_exists = check2.good();
+        check2.close();
+        std::ofstream iter_csv(ITER_CSV, std::ios::app);
+        if (!iter_exists)
+            iter_csv << "Case,Iteration,KError\n";
+
+        std::ifstream check3(INNER_ITER_CSV);
+        bool inner_exists = check3.good();
+        check3.close();
+        std::ofstream inner_csv(INNER_ITER_CSV, std::ios::app);
+        if (!inner_exists)
+            inner_csv << "Case,OuterIteration,InnerIterationGlobal,InnerIterationLocal,BetaResidual\n";
     }
 
     void TearDown() override { csv.close(); }
 
     void log2Phase(const std::string& cas, const std::string& sys, double T, double P,
                    const std::string& method, double beta, int iters, long time_us,
-                   const std::vector<double>& y, const std::vector<double>& x) {
+                   const std::vector<double>& y, const std::vector<double>& x,
+                   const std::vector<double>& iter_history = {},
+                   const std::vector<double>& inner_beta_history = {},
+                   const std::vector<int>& inner_start_indices = {},
+                   const std::vector<int>& inner_counts = {}) {
         csv << cas << "," << sys << "," << T << "," << P/1e5 << ","
             << method << "," << beta << "," << iters << "," << time_us << ",CONVERGED\n";
+        // Write iteration history
+        if (!iter_history.empty()) {
+            std::ofstream iter_csv(ITER_CSV, std::ios::app);
+            for (size_t i = 0; i < iter_history.size(); ++i)
+                iter_csv << cas << "," << (i+1) << "," << iter_history[i] << "\n";
+        }
+        if (!inner_beta_history.empty() &&
+            inner_start_indices.size() == inner_counts.size()) {
+            std::ofstream inner_csv(INNER_ITER_CSV, std::ios::app);
+            for (size_t outer = 0; outer < inner_counts.size(); ++outer) {
+                int start = inner_start_indices[outer];
+                int count = inner_counts[outer];
+                for (int local = 0; local < count; ++local) {
+                    int global = start + local;
+                    if (global >= 0 &&
+                        global < static_cast<int>(inner_beta_history.size())) {
+                        inner_csv << cas << "," << (outer + 1) << "," << (global + 1)
+                                  << "," << (local + 1) << ","
+                                  << inner_beta_history[global] << "\n";
+                    }
+                }
+            }
+        }
         std::ofstream log(LOG_PATH, std::ios::app);
         log << "\n=== " << cas << " [" << method << "] ===\n"
             << "T=" << T << "K P=" << P/1e5 << "bar beta=" << beta << "\n"
@@ -180,7 +247,8 @@ TEST_F(RRThesisTest, Case9_5comp_280K_50bar) {
     f.calculate(ConvergenceMethod::NEWTON_RAPHSON);
     long tc9 = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now()-t0).count();
     f.printResult();
-    log2Phase("Case9_RR", "C1-C2-C3-nC4-nC5", T, P, "Newton", f.getVaporFraction(), f.getIterations(), tc9, f.getVapComp(), f.getLiqComp());
+    printInnerBetaHistory("Case9_RR", f.getIterBetaResidualHistory(), f.getOuterInnerStartIndices(), f.getOuterInnerCounts());
+    log2Phase("Case9_RR", "C1-C2-C3-nC4-nC5", T, P, "Newton", f.getVaporFraction(), f.getIterations(), tc9, f.getVapComp(), f.getLiqComp(), f.getIterKHistory(), f.getIterBetaResidualHistory(), f.getOuterInnerStartIndices(), f.getOuterInnerCounts());
     EXPECT_GE(f.getVaporFraction(), 0.0);
 }
 
@@ -193,7 +261,8 @@ TEST_F(RRThesisTest, Case10_11comp_295K_20bar) {
     f.calculate(ConvergenceMethod::NEWTON_RAPHSON);
     long tc10 = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now()-t0).count();
     f.printResult();
-    log2Phase("Case10_RR", "11comp", T, P, "Newton", f.getVaporFraction(), f.getIterations(), tc10, f.getVapComp(), f.getLiqComp());
+    printInnerBetaHistory("Case10_RR", f.getIterBetaResidualHistory(), f.getOuterInnerStartIndices(), f.getOuterInnerCounts());
+    log2Phase("Case10_RR", "11comp", T, P, "Newton", f.getVaporFraction(), f.getIterations(), tc10, f.getVapComp(), f.getLiqComp(), f.getIterKHistory(), f.getIterBetaResidualHistory(), f.getOuterInnerStartIndices(), f.getOuterInnerCounts());
     EXPECT_GE(f.getVaporFraction(), 0.0);
 }
 
@@ -206,7 +275,8 @@ TEST_F(RRThesisTest, Case11_20comp_300K_50bar) {
     f.calculate(ConvergenceMethod::NEWTON_RAPHSON);
     long tc11 = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now()-t0).count();
     f.printResult();
-    log2Phase("Case11_RR", "20comp", T, P, "Newton", f.getVaporFraction(), f.getIterations(), tc11, f.getVapComp(), f.getLiqComp());
+    printInnerBetaHistory("Case11_RR", f.getIterBetaResidualHistory(), f.getOuterInnerStartIndices(), f.getOuterInnerCounts());
+    log2Phase("Case11_RR", "20comp", T, P, "Newton", f.getVaporFraction(), f.getIterations(), tc11, f.getVapComp(), f.getLiqComp(), f.getIterKHistory(), f.getIterBetaResidualHistory(), f.getOuterInnerStartIndices(), f.getOuterInnerCounts());
     EXPECT_GE(f.getVaporFraction(), 0.0);
 }
 
@@ -215,6 +285,6 @@ TEST_F(RRThesisTest, Case11_20comp_300K_50bar) {
 int main(int argc, char **argv) {
     rrflash::setLogLevel(spdlog::level::debug);
     ::testing::InitGoogleTest(&argc, argv);
-    ::testing::GTEST_FLAG(filter) = "RRThesisTest.Case10_11comp_295K_20bar";
+    // ::testing::GTEST_FLAG(filter) = "RRThesisTest.Case9_5comp_280K_50bar:RRThesisTest.Case10_11comp_295K_20bar:RRThesisTest.Case11_20comp_300K_50bar";
     return RUN_ALL_TESTS();
 }

@@ -9,6 +9,7 @@
 
 static const std::string CSV_PATH = "/Users/madao/Desktop/2606/thesis_data/rand_results.csv";
 static const std::string LOG_PATH = "/Users/madao/Desktop/2606/thesis_data/rand_detailed.log";
+static const std::string ITER_CSV = "/Users/madao/Desktop/2606/thesis_data/rand_iter_history.csv";
 
 class RANDThesisTest : public ::testing::Test {
 protected:
@@ -23,6 +24,13 @@ protected:
         csv.open(CSV_PATH, std::ios::app);
         if (!exists)
             csv << "Case,System,T_K,P_bar,Phases,Beta,Iterations,ChemPotError,ElemResidual,Status\n";
+
+        std::ifstream iter_check(ITER_CSV);
+        bool iter_exists = iter_check.good();
+        iter_check.close();
+        std::ofstream iter_csv(ITER_CSV, std::ios::app);
+        if (!iter_exists)
+            iter_csv << "Case,Iteration,MuError\n";
     }
 
     void TearDown() override { csv.close(); }
@@ -45,6 +53,12 @@ protected:
             << (r.success ? "CONVERGED" : "FAILED");
         if (us >= 0) csv << "," << us;
         csv << "\n";
+
+        if (!r.iter_mu_history.empty()) {
+            std::ofstream iter_csv(ITER_CSV, std::ios::app);
+            for (size_t i = 0; i < r.iter_mu_history.size(); ++i)
+                iter_csv << cas << "," << (i + 1) << "," << r.iter_mu_history[i] << "\n";
+        }
 
         std::ofstream log(LOG_PATH, std::ios::app);
         log << "\n=== " << cas << " ===\nT=" << T << "K P=" << P/1e5
@@ -101,7 +115,7 @@ TEST_F(RANDThesisTest, Case7_CO2_C3H8_310K_70bar) {
 TEST_F(RANDThesisTest, Case9_5comp_280K_50bar) {
     auto backend = std::make_unique<thermo::ThermoPackBackend>("C1,C2,C3,nC4,nC5", "SRK");
     randflash::RandFlash solver(*backend, *linSolver);
-    std::vector<double> z = {0.85, 0.08, 0.04, 0.02, 0.01};
+    std::vector<double> z = {8.5, 0.8, 0.4, 0.2, 0.1};
     randflash::FlashInput input{280.0, 50e5, z};
     randflash::SolveOptions opts;
     opts.enable_stability_test = false;
@@ -133,13 +147,27 @@ TEST_F(RANDThesisTest, Case10_11comp_295K_20bar) {
     EXPECT_TRUE(r.success);
 }
 
+// TEST_F(RANDThesisTest, Case10_11comp_295K_20bar_ScaledFeed) {
+//     auto backend = std::make_unique<thermo::ThermoPackBackend>("N2,CO2,C1,C2,C3,iC4,nC4,iC5,nC5,nC6,nC7", "SRK");
+//     randflash::RandFlash solver(*backend, *linSolver);
+//     std::vector<double> z = {0.03,0.15,5.5,1.4,1.2,0.5,0.45,0.3,0.25,0.12,0.1};
+//     randflash::FlashInput input{295.0, 20e5, z};
+//     randflash::SolveOptions opts;
+//     opts.enable_stability_test = false;
+//     opts.forced_phase_count = 2;
+//     opts.forced_phase_flags = {backend->vaporPhaseFlag(), backend->liquidPhaseFlag()};
+//     auto r = solver.solve(input, eye(11), opts);
+//     solver.printResult(r);
+//     EXPECT_TRUE(r.success);
+// }
+
 // Case 11: 20-comp natural gas, T=300K, P=50bar
 TEST_F(RANDThesisTest, Case11_20comp_300K_50bar) {
     auto backend = std::make_unique<thermo::ThermoPackBackend>(
         "N2,CO2,C1,C2,C3,iC4,nC4,iC5,nC5,nC6,nC7,nC8,nC9,nC10,nC11,nC12,nC13,nC14,nC15,nC16", "SRK");
     randflash::RandFlash solver(*backend, *linSolver);
-    std::vector<double> z = {0.01,0.02,0.70,0.10,0.06,0.03,0.02,0.015,0.01,0.008,
-                             0.006,0.004,0.003,0.002,0.001,0.001,0.001,0.001,0.001,0.007};
+    std::vector<double> z = {0.1,0.2,7.0,1.0,0.6,0.3,0.2,0.15,0.1,0.08,
+                             0.06,0.04,0.03,0.02,0.01,0.01,0.01,0.01,0.01,0.07};
     randflash::FlashInput input{300.0, 50e5, z};
     randflash::SolveOptions opts;
     opts.enable_stability_test = false;
@@ -263,6 +291,6 @@ TEST_F(RANDThesisTest, Case16_AmmoniaSynthesis) {
 int main(int argc, char **argv) {
     randflash::setLogLevel(spdlog::level::debug);
     ::testing::InitGoogleTest(&argc, argv);
-    ::testing::GTEST_FLAG(filter) = "RANDThesisTest.Case15_Methanation";
+    ::testing::GTEST_FLAG(filter) = "RANDThesisTest.Case11_20comp_300K_50bar";
     return RUN_ALL_TESTS();
 }

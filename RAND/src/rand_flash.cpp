@@ -535,7 +535,18 @@ double RandFlash::lineSearch(
       }
       return true;
   };
+  // 打印 dnPhases 全部元素的最大值和最小值
+  double dn_min = std::numeric_limits<double>::max();
+  double dn_max = std::numeric_limits<double>::lowest();
 
+  for (size_t j = 0; j < dnPhases.size(); ++j) {
+      for (size_t i = 0; i < dnPhases[j].size(); ++i) {
+          dn_min = std::min(dn_min, dnPhases[j][i]);
+          dn_max = std::max(dn_max, dnPhases[j][i]);
+      }
+  }
+
+  RAND_DEBUG("  dnPhases min = {}, max = {}", dn_min, dn_max);
   // 下降方向度量: sum_j (dn_j . g_j)
   double dir = 0.0;
   for (size_t j=0; j<F; ++j) {

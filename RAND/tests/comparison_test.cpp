@@ -61,7 +61,7 @@ TEST_F(ComparisonTest, Case2_CO2_C3_RAND) {
     randflash::SolveOptions opts;
     opts.enable_stability_test = false;
     opts.forced_phase_count = 2;
-    opts.forced_phase_flags = {backend->vaporPhaseFlag(), backend->liquidPhaseFlag()};
+    // opts.forced_phase_flags = {backend->vaporPhaseFlag(), backend->liquidPhaseFlag()};
     auto t0 = std::chrono::high_resolution_clock::now();
     auto r = solver.solve(input, eye(2), opts);
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now()-t0).count();
@@ -239,6 +239,6 @@ TEST_F(ComparisonTest, Case26_WaterGasShift_600K) {
 int main(int argc, char **argv) {
     randflash::setLogLevel(spdlog::level::debug);
     ::testing::InitGoogleTest(&argc, argv);
-    ::testing::GTEST_FLAG(filter) = "ComparisonTest.Case2_CO2_C3_RAND";
+    // ::testing::GTEST_FLAG(filter) = "ComparisonTest.Case2_CO2_C3_RAND";
     return RUN_ALL_TESTS();
 }

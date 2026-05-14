@@ -17,7 +17,8 @@ class NewtonRaphsonSolver {
 public:
   static double solve(const std::function<double(double)> &func,
                       const std::function<double(double)> &func_deriv,
-                      double initial_guess, double tol, int max_iter);
+                      double initial_guess, double tol, int max_iter,
+                      std::vector<double> *residual_history = nullptr);
 };
 
 // 基类 Flash
@@ -36,6 +37,10 @@ protected:
   thermo::IThermoBackend &thermo_backend_;
   FlashType flash_type_;
   int iterations_ = 0;
+  std::vector<double> iter_k_history;  // max_k_diff per outer iteration
+  std::vector<double> iter_beta_residual_history;  // flattened inner Newton residuals
+  std::vector<int> outer_inner_start_indices;      // start offset of each outer iteration in flattened inner history
+  std::vector<int> outer_inner_counts;             // number of inner Newton iterations used by each outer iteration
 
 public:
   Flash(const std::vector<double> &composition,
@@ -73,6 +78,10 @@ public:
   [[nodiscard]] auto getTemperature() const -> double { return temperature_; }
   [[nodiscard]] auto getPressure() const -> double { return pressure_; }
   [[nodiscard]] auto getIterations() const -> int { return iterations_; }
+  [[nodiscard]] auto getIterKHistory() const -> const std::vector<double>& { return iter_k_history; }
+  [[nodiscard]] auto getIterBetaResidualHistory() const -> const std::vector<double>& { return iter_beta_residual_history; }
+  [[nodiscard]] auto getOuterInnerStartIndices() const -> const std::vector<int>& { return outer_inner_start_indices; }
+  [[nodiscard]] auto getOuterInnerCounts() const -> const std::vector<int>& { return outer_inner_counts; }
   auto getVapComp() -> std::vector<double> { return vap_comp_frac_; }
   auto getLiqComp() -> std::vector<double> { return liq_comp_frac_; }
 };

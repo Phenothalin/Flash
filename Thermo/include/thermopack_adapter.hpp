@@ -60,17 +60,31 @@ public:
             int phase) const
   {
     std::vector<double> x = x_or_n;
+    double total_moles = 1.0;
     // 简单判断：若和为 1±1e-12 视为 x；否则按 n 归一
     double s = std::accumulate(x.begin(), x.end(), 0.0);
     if (std::abs(s - 1.0) > 1e-8) {
-      x = normalize_n(x_or_n).first;
+      auto xN = normalize_n(x_or_n);
+      x = std::move(xN.first);
+      total_moles = xN.second;
     }
-    /* dlnfugdn在∑n = const这一约束下数值等价于dlnfugdx(易推导)
-    因此后续构建的dmudn、m矩阵都是在∑n = const的约束下的（等价于gibbs-duhem约束）*/
+
+    // ThermoPack's derivative here is evaluated on the normalized composition.
+    // Convert it to a derivative with respect to phase mole numbers n by
+    // applying the chain-rule scale factor dx/dn ~ 1/N.
     auto prop = eos_.thermo(T, P, x, phase, /*dlnfugdt*/false,
                                       /*dlnfugdp*/false,
                                       /*dlnfugdn*/true);
-    return prop.dn(); // nc x nc
+    auto dlnphi = prop.dn(); // nc x nc
+    if (total_moles > 0.0 && std::abs(total_moles - 1.0) > 1e-12) {
+      const double inv_total = 1.0 / total_moles;
+      for (auto& row : dlnphi) {
+        for (double& v : row) {
+          v *= inv_total;
+        }
+      }
+    }
+    return dlnphi;
   }
 
   // -------- 2) 组装 d(ln f)/dn = d(ln phi)/dn + d(ln x)/dn --------
@@ -84,7 +98,10 @@ public:
     const std::vector<double>& x = xN.first;
     const double N = xN.second;
 
-    auto dlnphi = dlnphi_dn(T, P, x, phase);
+    // dlnphi_dn must be evaluated against the phase mole numbers n, not the
+    // normalized composition x. Otherwise the 1/N chain-rule scaling is lost,
+    // while d(ln x)/dn below is still built in mole-number coordinates.
+    auto dlnphi = dlnphi_dn(T, P, n, phase);
     const size_t nc = x.size();
 
     // d(ln x_i)/dn_j = (δ_ij / n_i) - 1/N
@@ -112,39 +129,26 @@ public:
   }
 
   // -------- 4) 化学势 μ：使用 thermopack 的 chemical_potential_tv (理想+剩余) --------
-  // 通过 TP -> TV 转换：先获取摩尔体积 V，再调用 chemical_potential_tv
+  // 对非反应相平衡求解，modified RAND 实际需要的是与 ln(f_i) 等价的势。
+  // 直接由 ln(phi_i) + ln(x_i) + ln(P) 组装可避免对总相摩尔数 N 的伪依赖。
   std::vector<double> chemicalPotentials(double T, double P,
              const std::vector<double>& n_or_x,
              int phase) const
   {
     auto nx = normalize_n(n_or_x);
     const auto& x = nx.first;
-    const double N = nx.second;
+    auto prop = eos_.thermo(T, P, x, phase,
+                            /*dlnfugdt*/false,
+                            /*dlnfugdp*/false,
+                            /*dlnfugdn*/false);
+    const auto& lnphi = prop.value();
 
-    // 1) 获取摩尔体积 Vm (m³/mol)
-    auto v_prop = eos_.specific_volume(T, P, x, phase);
-    double Vm = v_prop.value();
-
-    // 2) 计算总体积 V = N * Vm
-    double V = N * Vm;
-
-    // 3) 调用 chemical_potential_tv 获取完整化学势 (理想 + 剩余)
-    // property_flag = PropertyFlag::total (0) 表示理想+剩余
-    std::vector<double> n_vec = n_or_x;
-    // 确保 n_vec 是摩尔数而非摩尔分数
-    double s = std::accumulate(n_vec.begin(), n_vec.end(), 0.0);
-    if (std::abs(s - 1.0) < 1e-8) {
-      // 输入是摩尔分数，转换为摩尔数 (假设总摩尔数为1)
-      n_vec = x;
-      V = Vm;
+    const double RT = R_CONST * T;
+    std::vector<double> mu(x.size(), 0.0);
+    for (size_t i = 0; i < x.size(); ++i) {
+      mu[i] = RT * (lnphi[i] + std::log(std::max(x[i], 1e-300)) + std::log(P));
     }
-
-    auto mu_prop = eos_.chemical_potential_tv(T, V, n_vec,
-                                               /*dmudt*/false,
-                                               /*dmudv*/false,
-                                               /*dmudn*/false,
-                                               PropertyFlag::total);
-    return mu_prop.value();
+    return mu;
   }
   
  // -------- 5) Wilson K 值 --------

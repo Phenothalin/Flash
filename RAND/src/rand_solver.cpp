@@ -536,6 +536,8 @@ MultiFlashResult RandFlash::solveGeneral(
                 mus_post, sys.elementMatrix, n_post, sys.feedMoles,
                 dnPhases, isReactive, Lambda);
 
+            result.iter_mu_history.push_back(conv.max_mu_diff);
+
             if (conv.converged) {
                 result.success = true;
                 result.iterations = iter + 1;

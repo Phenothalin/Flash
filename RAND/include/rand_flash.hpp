@@ -131,6 +131,7 @@ struct MultiFlashResult {
   int iterations = 0;
   double mu_infinity_norm = 0.0;
   double elem_residual_inf = 0.0;
+  std::vector<double> iter_mu_history;  // max_mu_diff per iteration
 
   // 便捷方法：获取相数
   size_t numPhases() const { return phases.size(); }
